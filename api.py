@@ -112,7 +112,11 @@ def _filter_ticker(ticker: str) -> dict:
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "fmp_configured": fmp.is_configured(),
+        "fmp_key_prefix": fmp.API_KEY[:4] + "..." if fmp.API_KEY else "NOT SET",
+    }
 
 
 @app.get("/api/config")

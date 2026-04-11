@@ -165,6 +165,8 @@ export default function Home() {
     setPhase("discovering");
     setStatusText("Scanning Yahoo, Finviz, Reddit, SEC, RSS...");
     setError(null);
+    setResults([]);
+    setSegments([]);
 
     try {
       // Step 1: Discover
@@ -177,19 +179,31 @@ export default function Home() {
         return;
       }
 
-      // Step 2: Score top candidates
+      // Step 2: Score in small batches (5 at a time to avoid timeouts)
       setPhase("scoring");
-      setStatusText(
-        `Found ${uni.total} tickers. Scoring top ${Math.min(40, uni.tickers.length)}...`
-      );
-      const scoreRes = await scoreTickers(
-        uni.tickers.slice(0, 40),
-        false
-      );
+      const toScore = uni.tickers.slice(0, 30);
+      const batchSize = 5;
+      const allRanked: StockResult[] = [];
 
-      // Step 3: Segment
-      setResults(scoreRes.ranked);
-      setSegments(segmentStocks(scoreRes.ranked));
+      for (let i = 0; i < toScore.length; i += batchSize) {
+        const batch = toScore.slice(i, i + batchSize);
+        setStatusText(
+          `Scoring ${i + batch.length}/${toScore.length}...`
+        );
+
+        try {
+          const scoreRes = await scoreTickers(batch, true);
+          allRanked.push(...scoreRes.ranked);
+
+          // Sort and update progressively
+          allRanked.sort((a, b) => b.composite - a.composite);
+          setResults([...allRanked]);
+          setSegments(segmentStocks([...allRanked]));
+        } catch {
+          // Skip failed batch, continue with rest
+        }
+      }
+
       setLastUpdated(new Date().toLocaleTimeString());
       setPhase("done");
     } catch (e) {

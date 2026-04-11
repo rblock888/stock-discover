@@ -45,16 +45,46 @@ def _yahoo_screen(screen_id: str, max_tickers: int = 50) -> list:
 
 def from_yahoo_gainers(max_tickers: int = 50) -> list:
     """Top daily gainers — stocks with sudden momentum."""
+    # Try FMP first (works on servers), fall back to yfinance
+    try:
+        import fmp
+        if fmp.is_configured():
+            data = fmp.get_gainers()
+            if data:
+                return [d["symbol"] for d in data if "symbol" in d][:max_tickers]
+    except Exception:
+        pass
     return _yahoo_screen("day_gainers", max_tickers)
 
 
 def from_yahoo_most_active(max_tickers: int = 50) -> list:
     """Most active by volume — stocks getting attention."""
+    try:
+        import fmp
+        if fmp.is_configured():
+            data = fmp.get_most_active()
+            if data:
+                return [d["symbol"] for d in data if "symbol" in d][:max_tickers]
+    except Exception:
+        pass
     return _yahoo_screen("most_actives", max_tickers)
 
 
 def from_yahoo_small_cap_gainers(max_tickers: int = 50) -> list:
     """Small cap gainers — the rerating sweet spot."""
+    try:
+        import fmp
+        if fmp.is_configured():
+            data = fmp.get_stock_screener(
+                market_cap_min=50_000_000,
+                market_cap_max=2_000_000_000,
+                volume_min=100_000,
+                limit=max_tickers,
+            )
+            if data:
+                return [d["symbol"] for d in data if "symbol" in d][:max_tickers]
+    except Exception:
+        pass
     return _yahoo_screen("small_cap_gainers", max_tickers)
 
 

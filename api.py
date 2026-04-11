@@ -9,6 +9,7 @@ from pydantic import BaseModel
 import json
 
 import config
+import fmp
 import fundamentals
 import momentum
 import catalysts
@@ -80,13 +81,21 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
 
 def _filter_ticker(ticker: str) -> dict:
     """Check if a ticker passes filters."""
-    import yfinance as yf
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info or {}
-        price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
-        avg_vol = info.get("averageVolume") or 0
-        mcap = info.get("marketCap") or 0
+        if fmp.is_configured():
+            quote = fmp.get_quote(ticker)
+            if not quote:
+                return {"ticker": ticker, "passed": False, "reason": "No data"}
+            price = quote.get("price", 0) or 0
+            avg_vol = quote.get("avgVolume", 0) or 0
+            mcap = quote.get("marketCap", 0) or 0
+        else:
+            import yfinance as yf
+            stock = yf.Ticker(ticker)
+            info = stock.info or {}
+            price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+            avg_vol = info.get("averageVolume") or 0
+            mcap = info.get("marketCap") or 0
 
         if price < config.MIN_PRICE or price > config.MAX_PRICE:
             return {"ticker": ticker, "passed": False, "reason": f"Price ${price:.2f}"}

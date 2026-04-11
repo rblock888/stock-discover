@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   discover,
   scoreTickers,
@@ -11,419 +11,442 @@ import { StockTable } from "@/components/StockTable";
 import { StockCard } from "@/components/StockCard";
 import { SourceBadges } from "@/components/SourceBadges";
 
-type ViewMode = "table" | "cards";
+type Segment = {
+  title: string;
+  description: string;
+  color: string;
+  stocks: StockResult[];
+};
+
+function segmentStocks(stocks: StockResult[]): Segment[] {
+  const segments: Segment[] = [];
+
+  // Multi-signal alerts (3+ buckets above 60)
+  const alerts = stocks.filter((s) => s.multi_signal_alert);
+  if (alerts.length > 0) {
+    segments.push({
+      title: "Multi-Signal Alerts",
+      description: "3+ scoring dimensions above 60 — strongest alignment",
+      color: "var(--amber)",
+      stocks: alerts,
+    });
+  }
+
+  // Momentum leaders (momentum > 70, not already in alerts)
+  const alertTickers = new Set(alerts.map((s) => s.ticker));
+  const momentumLeaders = stocks.filter(
+    (s) =>
+      !alertTickers.has(s.ticker) &&
+      s.breakdown.momentum.raw >= 70
+  );
+  if (momentumLeaders.length > 0) {
+    segments.push({
+      title: "Momentum Leaders",
+      description: "Strong price action and relative strength",
+      color: "var(--green)",
+      stocks: momentumLeaders,
+    });
+  }
+
+  // Fundamental strength (fundamentals > 70, not in above)
+  const usedTickers = new Set([
+    ...alertTickers,
+    ...momentumLeaders.map((s) => s.ticker),
+  ]);
+  const fundStrong = stocks.filter(
+    (s) =>
+      !usedTickers.has(s.ticker) &&
+      s.breakdown.fundamentals.raw >= 70
+  );
+  if (fundStrong.length > 0) {
+    segments.push({
+      title: "Fundamental Strength",
+      description: "Strong revenue growth, margins, and cash position",
+      color: "var(--accent)",
+      stocks: fundStrong,
+    });
+  }
+
+  // Catalyst plays (catalyst > 65, not in above)
+  const usedTickers2 = new Set([
+    ...usedTickers,
+    ...fundStrong.map((s) => s.ticker),
+  ]);
+  const catalystPlays = stocks.filter(
+    (s) =>
+      !usedTickers2.has(s.ticker) &&
+      s.breakdown.catalyst.raw >= 65
+  );
+  if (catalystPlays.length > 0) {
+    segments.push({
+      title: "Catalyst Plays",
+      description: "Upcoming earnings, analyst upgrades, or news flow",
+      color: "#a78bfa",
+      stocks: catalystPlays,
+    });
+  }
+
+  // Insider activity (insider > 65, not in above)
+  const usedTickers3 = new Set([
+    ...usedTickers2,
+    ...catalystPlays.map((s) => s.ticker),
+  ]);
+  const insiderBuying = stocks.filter(
+    (s) =>
+      !usedTickers3.has(s.ticker) &&
+      s.breakdown.insider.raw >= 65
+  );
+  if (insiderBuying.length > 0) {
+    segments.push({
+      title: "Insider Activity",
+      description: "Notable insider buying or tight ownership structure",
+      color: "#22c55e",
+      stocks: insiderBuying,
+    });
+  }
+
+  // Social buzz (sentiment > 65, not in above)
+  const usedTickers4 = new Set([
+    ...usedTickers3,
+    ...insiderBuying.map((s) => s.ticker),
+  ]);
+  const socialBuzz = stocks.filter(
+    (s) =>
+      !usedTickers4.has(s.ticker) &&
+      s.breakdown.sentiment.raw >= 65
+  );
+  if (socialBuzz.length > 0) {
+    segments.push({
+      title: "Social Buzz",
+      description: "Rising Reddit mentions with positive sentiment",
+      color: "#f97316",
+      stocks: socialBuzz,
+    });
+  }
+
+  // Watchlist (remaining with composite > 45)
+  const allUsed = new Set([
+    ...usedTickers4,
+    ...socialBuzz.map((s) => s.ticker),
+  ]);
+  const watchlist = stocks.filter(
+    (s) => !allUsed.has(s.ticker) && s.composite >= 45
+  );
+  if (watchlist.length > 0) {
+    segments.push({
+      title: "Watchlist",
+      description: "Moderate scores — worth monitoring for improvement",
+      color: "var(--text-secondary)",
+      stocks: watchlist,
+    });
+  }
+
+  return segments;
+}
+
+type Phase =
+  | "discovering"
+  | "filtering"
+  | "scoring"
+  | "done"
+  | "error";
 
 export default function Home() {
-  const [mode, setMode] = useState<"auto" | "manual">("auto");
-  const [viewMode, setViewMode] = useState<ViewMode>("table");
-  const [manualTickers, setManualTickers] = useState(
-    "LWLG, ASTS, RKLB, LUNR, IONQ"
-  );
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
+  const [phase, setPhase] = useState<Phase>("discovering");
+  const [statusText, setStatusText] = useState("Scanning sources...");
   const [universe, setUniverse] = useState<UniverseResponse | null>(null);
   const [results, setResults] = useState<StockResult[]>([]);
-  const [alerts, setAlerts] = useState<string[]>([]);
-  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string>("");
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
-  const [sources, setSources] = useState({
-    use_yahoo: true,
-    use_finviz: true,
-    use_reddit: true,
-    use_sec: true,
-    use_rss: true,
-  });
-
-  async function runAutoDiscovery() {
-    setLoading(true);
+  const runPipeline = useCallback(async () => {
+    setPhase("discovering");
+    setStatusText("Scanning Yahoo, Finviz, Reddit, SEC, RSS...");
     setError(null);
-    setResults([]);
-    setAlerts([]);
+
     try {
-      setStatus("Discovering tickers from multiple sources...");
-      const uni = await discover(sources);
+      // Step 1: Discover
+      const uni = await discover();
       setUniverse(uni);
 
       if (uni.tickers.length === 0) {
-        setStatus("No tickers discovered.");
-        setLoading(false);
+        setError("No tickers discovered from any source.");
+        setPhase("error");
         return;
       }
 
-      setStatus(`Found ${uni.total} tickers. Scoring top candidates...`);
-      const scoreRes = await scoreTickers(uni.tickers.slice(0, 30), false);
-      setResults(scoreRes.ranked);
-      setAlerts(scoreRes.alerts);
-      setStatus(
-        `Scored ${scoreRes.ranked.length} stocks. ${scoreRes.alerts.length} multi-signal alerts.`
+      // Step 2: Score top candidates
+      setPhase("scoring");
+      setStatusText(
+        `Found ${uni.total} tickers. Scoring top ${Math.min(40, uni.tickers.length)}...`
       );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
-      setStatus("");
-    }
-    setLoading(false);
-  }
-
-  async function runManualScan() {
-    setLoading(true);
-    setError(null);
-    setResults([]);
-    setAlerts([]);
-    setUniverse(null);
-    try {
-      const tickers = manualTickers
-        .split(/[,\s]+/)
-        .map((t) => t.trim().toUpperCase())
-        .filter(Boolean);
-
-      if (tickers.length === 0) {
-        setError("Enter at least one ticker.");
-        setLoading(false);
-        return;
-      }
-
-      setStatus(`Scoring ${tickers.length} tickers...`);
-      const scoreRes = await scoreTickers(tickers, true);
-      setResults(scoreRes.ranked);
-      setAlerts(scoreRes.alerts);
-      setStatus(
-        `Scored ${scoreRes.ranked.length} stocks. ${scoreRes.alerts.length} multi-signal alerts.`
+      const scoreRes = await scoreTickers(
+        uni.tickers.slice(0, 40),
+        false
       );
+
+      // Step 3: Segment
+      setResults(scoreRes.ranked);
+      setSegments(segmentStocks(scoreRes.ranked));
+      setLastUpdated(new Date().toLocaleTimeString());
+      setPhase("done");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
-      setStatus("");
+      setError(e instanceof Error ? e.message : "Failed to connect to API");
+      setPhase("error");
     }
-    setLoading(false);
-  }
+  }, []);
 
-  const selectedStock =
-    selectedTicker && results.find((r) => r.ticker === selectedTicker);
+  // Auto-run on mount
+  useEffect(() => {
+    runPipeline();
+  }, [runPipeline]);
 
-  return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar */}
-      <aside
-        className="w-72 shrink-0 flex flex-col overflow-y-auto"
-        style={{
-          backgroundColor: "var(--bg-surface)",
-          borderRight: "1px solid var(--border)",
-        }}
-      >
-        {/* Logo */}
-        <div
-          className="px-5 py-4"
-          style={{ borderBottom: "1px solid var(--border)" }}
-        >
-          <h1 className="text-lg font-bold tracking-tight">Stock Discovery</h1>
-          <p
-            className="text-[11px] mt-0.5"
-            style={{ color: "var(--text-muted)" }}
-          >
-            Multi-signal rerating scanner
-          </p>
-        </div>
+  const selectedStock = selectedTicker
+    ? results.find((r) => r.ticker === selectedTicker) ?? null
+    : null;
 
-        {/* Mode toggle */}
-        <div
-          className="px-4 py-3"
-          style={{ borderBottom: "1px solid var(--border)" }}
-        >
-          <div
-            className="flex rounded-md overflow-hidden text-xs"
-            style={{ border: "1px solid var(--border)" }}
-          >
-            <button
-              className="flex-1 px-3 py-1.5 transition-colors font-medium"
-              style={{
-                backgroundColor:
-                  mode === "auto" ? "var(--accent-dim)" : "transparent",
-                color:
-                  mode === "auto" ? "var(--accent)" : "var(--text-secondary)",
-              }}
-              onClick={() => setMode("auto")}
-            >
-              Auto-Discovery
-            </button>
-            <button
-              className="flex-1 px-3 py-1.5 transition-colors font-medium"
-              style={{
-                backgroundColor:
-                  mode === "manual" ? "var(--accent-dim)" : "transparent",
-                color:
-                  mode === "manual"
-                    ? "var(--accent)"
-                    : "var(--text-secondary)",
-                borderLeft: "1px solid var(--border)",
-              }}
-              onClick={() => setMode("manual")}
-            >
-              Manual
-            </button>
+  // Loading state
+  if (phase === "discovering" || phase === "scoring" || phase === "filtering") {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-5">
+          <div className="relative">
+            <div
+              className="w-16 h-16 border-[3px] border-t-transparent rounded-full animate-spin"
+              style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
+            />
           </div>
-        </div>
-
-        {/* Mode-specific controls */}
-        <div
-          className="px-4 py-3 flex-1"
-          style={{ borderBottom: "1px solid var(--border)" }}
-        >
-          {mode === "auto" ? (
-            <div className="space-y-2">
-              <p
-                className="text-[11px] uppercase tracking-[0.06em] font-medium mb-2"
-                style={{ color: "var(--text-muted)" }}
-              >
-                Sources
-              </p>
-              {Object.entries(sources).map(([key, enabled]) => (
-                <label
-                  key={key}
-                  className="flex items-center gap-2 text-xs cursor-pointer"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={enabled}
-                    onChange={() =>
-                      setSources((s) => ({
-                        ...s,
-                        [key]: !s[key as keyof typeof s],
-                      }))
-                    }
-                    className="rounded"
-                    style={{ accentColor: "var(--accent)" }}
-                  />
-                  {key
-                    .replace("use_", "")
-                    .replace("_", " ")
-                    .replace(/\b\w/g, (c) => c.toUpperCase())}
-                </label>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p
-                className="text-[11px] uppercase tracking-[0.06em] font-medium mb-2"
-                style={{ color: "var(--text-muted)" }}
-              >
-                Tickers
-              </p>
-              <textarea
-                value={manualTickers}
-                onChange={(e) => setManualTickers(e.target.value)}
-                rows={4}
-                className="w-full text-xs rounded-md px-3 py-2 resize-none focus:outline-none"
-                style={{
-                  backgroundColor: "var(--bg-primary)",
-                  border: "1px solid var(--border)",
-                  color: "var(--text-primary)",
-                }}
-                placeholder="LWLG, ASTS, RKLB..."
-              />
+          <div className="text-center">
+            <h2 className="text-lg font-semibold tracking-tight mb-1">
+              Stock Discovery
+            </h2>
+            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+              {statusText}
+            </p>
+          </div>
+          {universe && (
+            <div className="mt-2">
+              <SourceBadges sources={universe.sources} />
             </div>
           )}
         </div>
+      </div>
+    );
+  }
 
-        {/* Run button */}
-        <div className="px-4 py-3">
-          <button
-            onClick={mode === "auto" ? runAutoDiscovery : runManualScan}
-            disabled={loading}
-            className="w-full py-2.5 rounded-md text-sm font-semibold transition-all duration-150 active:scale-[0.98]"
-            style={{
-              backgroundColor: loading
-                ? "var(--bg-surface-hover)"
-                : "var(--accent)",
-              color: loading ? "var(--text-muted)" : "#fff",
-              cursor: loading ? "not-allowed" : "pointer",
-            }}
+  // Error state
+  if (phase === "error") {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-4 max-w-md text-center">
+          <div
+            className="w-14 h-14 rounded-full flex items-center justify-center text-xl"
+            style={{ backgroundColor: "var(--red-dim)" }}
           >
-            {loading ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                Processing...
-              </span>
-            ) : mode === "auto" ? (
-              "Run Auto-Discovery"
-            ) : (
-              "Score Tickers"
-            )}
+            !
+          </div>
+          <h2 className="text-lg font-semibold">Connection Error</h2>
+          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+            {error}
+          </p>
+          <button
+            onClick={runPipeline}
+            className="px-4 py-2 rounded-md text-sm font-medium mt-2"
+            style={{ backgroundColor: "var(--accent)", color: "#fff" }}
+          >
+            Retry
           </button>
         </div>
+      </div>
+    );
+  }
 
-        {/* Universe info */}
-        {universe && (
-          <div
-            className="px-4 py-3"
-            style={{ borderTop: "1px solid var(--border)" }}
-          >
-            <p
-              className="text-[11px] uppercase tracking-[0.06em] font-medium mb-2"
-              style={{ color: "var(--text-muted)" }}
+  // Dashboard
+  return (
+    <div className="min-h-screen">
+      {/* Top bar */}
+      <header
+        className="sticky top-0 z-10 px-6 py-3 flex items-center justify-between"
+        style={{
+          backgroundColor: "var(--bg-surface)",
+          borderBottom: "1px solid var(--border)",
+        }}
+      >
+        <div>
+          <h1 className="text-base font-bold tracking-tight">Stock Discovery</h1>
+          <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+            {results.length} stocks scored across {segments.length} segments
+          </p>
+        </div>
+        <div className="flex items-center gap-4">
+          {universe && <SourceBadges sources={universe.sources} />}
+          <div className="flex items-center gap-2">
+            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+              Updated {lastUpdated}
+            </span>
+            <button
+              onClick={runPipeline}
+              className="px-3 py-1.5 rounded-md text-xs font-medium transition-all active:scale-[0.97]"
+              style={{
+                backgroundColor: "var(--bg-surface-hover)",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)",
+              }}
             >
-              Discovered {universe.total} tickers
-            </p>
-            <SourceBadges sources={universe.sources} />
+              Refresh
+            </button>
           </div>
-        )}
-      </aside>
+        </div>
+      </header>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-y-auto p-6">
-        {/* Header bar */}
-        {results.length > 0 && (
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-lg font-semibold tracking-tight">
-                Results
-                <span
-                  className="text-sm font-normal ml-2"
+      {/* Stats bar */}
+      <div
+        className="px-6 py-3 flex gap-6"
+        style={{ borderBottom: "1px solid var(--border)" }}
+      >
+        <Stat
+          label="Discovered"
+          value={universe?.total ?? 0}
+          suffix="tickers"
+        />
+        <Stat label="Scored" value={results.length} suffix="stocks" />
+        <Stat
+          label="Alerts"
+          value={results.filter((r) => r.multi_signal_alert).length}
+          color="var(--amber)"
+        />
+        <Stat
+          label="Top Score"
+          value={results.length > 0 ? results[0].composite.toFixed(1) : "—"}
+          color="var(--green)"
+        />
+        <Stat
+          label="Sources"
+          value={Object.keys(universe?.sources ?? {}).length}
+        />
+      </div>
+
+      {/* Segments */}
+      <main className="px-6 py-6 space-y-8">
+        {segments.map((segment) => (
+          <section key={segment.title}>
+            <div className="flex items-center gap-3 mb-3">
+              <span
+                className="w-1 h-6 rounded-full"
+                style={{ backgroundColor: segment.color }}
+              />
+              <div>
+                <h2 className="text-base font-semibold tracking-tight">
+                  {segment.title}
+                  <span
+                    className="text-sm font-normal ml-2"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {segment.stocks.length}
+                  </span>
+                </h2>
+                <p
+                  className="text-[11px]"
                   style={{ color: "var(--text-secondary)" }}
                 >
-                  {results.length} stocks scored
-                </span>
-              </h2>
-              {alerts.length > 0 && (
-                <p
-                  className="text-xs mt-1"
-                  style={{ color: "var(--amber)" }}
-                >
-                  {alerts.length} multi-signal alert
-                  {alerts.length > 1 ? "s" : ""}: {alerts.join(", ")}
+                  {segment.description}
                 </p>
-              )}
+              </div>
             </div>
-            <div
-              className="flex rounded-md overflow-hidden text-[11px]"
-              style={{ border: "1px solid var(--border)" }}
-            >
-              <button
-                className="px-3 py-1.5"
-                style={{
-                  backgroundColor:
-                    viewMode === "table"
-                      ? "var(--bg-surface-hover)"
-                      : "transparent",
-                  color:
-                    viewMode === "table"
-                      ? "var(--text-primary)"
-                      : "var(--text-muted)",
-                }}
-                onClick={() => setViewMode("table")}
-              >
-                Table
-              </button>
-              <button
-                className="px-3 py-1.5"
-                style={{
-                  backgroundColor:
-                    viewMode === "cards"
-                      ? "var(--bg-surface-hover)"
-                      : "transparent",
-                  color:
-                    viewMode === "cards"
-                      ? "var(--text-primary)"
-                      : "var(--text-muted)",
-                  borderLeft: "1px solid var(--border)",
-                }}
-                onClick={() => setViewMode("cards")}
-              >
-                Cards
-              </button>
-            </div>
-          </div>
-        )}
 
-        {/* Error */}
-        {error && (
-          <div
-            className="rounded-lg px-4 py-3 text-sm mb-4"
-            style={{
-              backgroundColor: "var(--red-dim)",
-              color: "var(--red)",
-              border: "1px solid var(--red)",
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        {/* Loading spinner */}
-        {loading && !results.length && (
-          <div className="flex flex-col items-center justify-center h-64 gap-4">
-            <div
-              className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin"
-              style={{
-                borderColor: "var(--accent)",
-                borderTopColor: "transparent",
-              }}
-            />
-            <p
-              className="text-sm"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              {status}
-            </p>
-          </div>
-        )}
-
-        {/* Empty state */}
-        {!loading && results.length === 0 && !error && (
-          <div className="flex flex-col items-center justify-center h-96 gap-3">
-            <div
-              className="w-16 h-16 rounded-full flex items-center justify-center text-2xl"
-              style={{ backgroundColor: "var(--bg-surface)" }}
-            >
-              📊
-            </div>
-            <h3 className="text-base font-medium">Ready to discover</h3>
-            <p
-              className="text-sm text-center max-w-md"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              {mode === "auto"
-                ? "Click Run Auto-Discovery to scan Yahoo, Finviz, Reddit, SEC filings, and RSS feeds for candidates."
-                : "Enter tickers and click Score to analyze them across 5 dimensions."}
-            </p>
-          </div>
-        )}
-
-        {/* Results */}
-        {results.length > 0 && (
-          <>
-            {viewMode === "table" ? (
-              <StockTable
-                stocks={results}
-                onSelect={setSelectedTicker}
-              />
-            ) : (
+            {segment.stocks.length <= 5 ? (
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-                {results.map((stock) => (
+                {segment.stocks.map((stock) => (
                   <StockCard key={stock.ticker} stock={stock} />
                 ))}
               </div>
+            ) : (
+              <StockTable
+                stocks={segment.stocks}
+                onSelect={setSelectedTicker}
+              />
             )}
-          </>
-        )}
 
-        {/* Detail panel below table */}
-        {selectedStock && viewMode === "table" && (
-          <div className="mt-4">
-            <StockCard stock={selectedStock as StockResult} />
+            {selectedStock &&
+              segment.stocks.some(
+                (s) => s.ticker === selectedStock.ticker
+              ) && (
+                <div className="mt-3">
+                  <StockCard stock={selectedStock} />
+                </div>
+              )}
+          </section>
+        ))}
+
+        {/* Full ranking at bottom */}
+        <section>
+          <div className="flex items-center gap-3 mb-3">
+            <span
+              className="w-1 h-6 rounded-full"
+              style={{ backgroundColor: "var(--text-muted)" }}
+            />
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">
+                Full Ranking
+                <span
+                  className="text-sm font-normal ml-2"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {results.length}
+                </span>
+              </h2>
+              <p
+                className="text-[11px]"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                All scored stocks ranked by composite score
+              </p>
+            </div>
           </div>
-        )}
+          <StockTable stocks={results} onSelect={setSelectedTicker} />
+          {selectedStock && (
+            <div className="mt-3">
+              <StockCard stock={selectedStock} />
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
 
-        {/* Status bar */}
-        {status && !loading && results.length > 0 && (
-          <p
-            className="text-xs mt-4"
+function Stat({
+  label,
+  value,
+  suffix,
+  color,
+}: {
+  label: string;
+  value: number | string;
+  suffix?: string;
+  color?: string;
+}) {
+  return (
+    <div>
+      <p
+        className="text-[10px] uppercase tracking-[0.08em]"
+        style={{ color: "var(--text-muted)" }}
+      >
+        {label}
+      </p>
+      <p className="text-lg font-bold tabular-nums" style={{ color }}>
+        {value}
+        {suffix && (
+          <span
+            className="text-[11px] font-normal ml-1"
             style={{ color: "var(--text-muted)" }}
           >
-            {status}
-          </p>
+            {suffix}
+          </span>
         )}
-      </main>
+      </p>
     </div>
   );
 }

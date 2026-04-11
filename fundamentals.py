@@ -133,7 +133,12 @@ def _fmp_score(ticker: str) -> dict:
 
     # Gross margin
     margin_score = 0
-    gm = income[0].get("grossProfitRatio", 0) if income else 0
+    if income:
+        gp = income[0].get("grossProfit", 0) or 0
+        rev = income[0].get("revenue", 0) or 0
+        gm = gp / rev if rev > 0 else income[0].get("grossProfitRatio", 0) or 0
+    else:
+        gm = 0
     if gm and gm > 0:
         margin_score = min(100, (gm / config.GROSS_MARGIN_GOOD) * 100)
         components["gross_margin"] = f"{gm:.1%}"

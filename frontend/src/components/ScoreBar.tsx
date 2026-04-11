@@ -33,7 +33,7 @@ export function ScoreBar({
     <div className="flex items-center gap-2">
       {label && (
         <span
-          className="text-[10px] uppercase tracking-[0.08em] w-[72px] shrink-0"
+          className="text-[11px] w-[85px] shrink-0"
           style={{ color: "var(--text-muted)", fontFamily: "var(--font-body)" }}
         >
           {label}

@@ -5,11 +5,11 @@ import { ScoreBar } from "./ScoreBar";
 import { useState } from "react";
 
 const BUCKET_LABELS: Record<string, string> = {
-  fundamentals: "Fund",
-  momentum: "Mom",
-  catalyst: "Cat",
-  insider: "Ins",
-  sentiment: "Sent",
+  fundamentals: "Fundamentals",
+  momentum: "Momentum",
+  catalyst: "Catalyst",
+  insider: "Insider",
+  sentiment: "Sentiment",
 };
 
 function extractPros(bd: Record<string, BucketScore>): string[] {

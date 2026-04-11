@@ -11,18 +11,19 @@ const BUCKET_KEYS = [
   "sentiment",
 ] as const;
 
+const COL_LABELS: Record<string, string> = {
+  fundamentals: "FUND",
+  momentum: "MOM",
+  catalyst: "CAT",
+  insider: "INS",
+  sentiment: "SENT",
+};
+
 function scoreColor(score: number): string {
   if (score >= 75) return "var(--green)";
-  if (score >= 60) return "#4ade80";
+  if (score >= 60) return "var(--green-bright)";
   if (score >= 40) return "var(--amber)";
   return "var(--red)";
-}
-
-function scoreBg(score: number): string {
-  if (score >= 75) return "var(--green-dim)";
-  if (score >= 60) return "rgba(74, 222, 128, 0.12)";
-  if (score >= 40) return "var(--amber-dim)";
-  return "var(--red-dim)";
 }
 
 type SortKey = "composite" | typeof BUCKET_KEYS[number] | "signals" | "early";
@@ -40,112 +41,81 @@ export function StockTable({
   const sorted = [...stocks].sort((a, b) => {
     let av: number, bv: number;
     if (sortKey === "composite") {
-      av = a.composite;
-      bv = b.composite;
+      av = a.composite; bv = b.composite;
     } else if (sortKey === "signals") {
-      av = a.signals_above_60;
-      bv = b.signals_above_60;
+      av = a.signals_above_60; bv = b.signals_above_60;
     } else if (sortKey === "early") {
-      av = a.early_detection?.score ?? 0;
-      bv = b.early_detection?.score ?? 0;
+      av = a.early_detection?.score ?? 0; bv = b.early_detection?.score ?? 0;
     } else {
-      av = a.breakdown[sortKey]?.raw ?? 0;
-      bv = b.breakdown[sortKey]?.raw ?? 0;
+      av = a.breakdown[sortKey]?.raw ?? 0; bv = b.breakdown[sortKey]?.raw ?? 0;
     }
     return sortAsc ? av - bv : bv - av;
   });
 
   function handleSort(key: SortKey) {
     if (sortKey === key) setSortAsc(!sortAsc);
-    else {
-      setSortKey(key);
-      setSortAsc(false);
-    }
+    else { setSortKey(key); setSortAsc(false); }
   }
 
-  const thClass =
-    "px-3 py-2 text-[11px] uppercase tracking-[0.06em] cursor-pointer select-none whitespace-nowrap";
   const arrow = (key: SortKey) =>
     sortKey === key ? (sortAsc ? " ↑" : " ↓") : "";
 
   return (
-    <div className="overflow-x-auto rounded-lg" style={{ border: "1px solid var(--border)" }}>
-      <table className="w-full text-sm">
+    <div className="overflow-x-auto rounded" style={{ border: "1px solid var(--border)" }}>
+      <table className="w-full" style={{ fontSize: "12px" }}>
         <thead>
-          <tr style={{ backgroundColor: "var(--bg-surface)" }}>
-            <th className={`${thClass} text-left`} style={{ color: "var(--text-secondary)" }}>
-              Ticker
-            </th>
-            <th
-              className={`${thClass} text-right`}
-              style={{ color: "var(--text-secondary)" }}
-              onClick={() => handleSort("composite")}
-            >
+          <tr style={{ backgroundColor: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
+            <Th align="left">Ticker</Th>
+            <Th align="right" onClick={() => handleSort("composite")}>
               Score{arrow("composite")}
-            </th>
+            </Th>
             {BUCKET_KEYS.map((key) => (
-              <th
-                key={key}
-                className={`${thClass} text-right`}
-                style={{ color: "var(--text-secondary)" }}
-                onClick={() => handleSort(key)}
-              >
-                {key.slice(0, 4).toUpperCase()}{arrow(key)}
-              </th>
+              <Th key={key} align="right" onClick={() => handleSort(key)} muted>
+                {COL_LABELS[key]}{arrow(key)}
+              </Th>
             ))}
-            <th
-              className={`${thClass} text-right`}
-              style={{ color: "#22c55e" }}
-              onClick={() => handleSort("early")}
-            >
+            <Th align="right" onClick={() => handleSort("early")} accent>
               Early{arrow("early")}
-            </th>
-            <th
-              className={`${thClass} text-center`}
-              style={{ color: "var(--text-secondary)" }}
-              onClick={() => handleSort("signals")}
-            >
-              Signals{arrow("signals")}
-            </th>
+            </Th>
+            <Th align="center" onClick={() => handleSort("signals")} muted>
+              Sig{arrow("signals")}
+            </Th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((stock, i) => (
             <tr
               key={stock.ticker}
-              className="cursor-pointer transition-colors duration-100"
+              className="cursor-pointer transition-colors duration-75"
               style={{
-                backgroundColor:
-                  i % 2 === 0 ? "var(--bg-primary)" : "var(--bg-surface)",
-                borderBottom: "1px solid var(--border)",
+                borderBottom: "1px solid var(--border-subtle)",
               }}
-              onMouseEnter={(e) =>
-                (e.currentTarget.style.backgroundColor =
-                  "var(--bg-surface-hover)")
-              }
-              onMouseLeave={(e) =>
-                (e.currentTarget.style.backgroundColor =
-                  i % 2 === 0 ? "var(--bg-primary)" : "var(--bg-surface)")
-              }
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface-hover)")}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
               onClick={() => onSelect?.(stock.ticker)}
             >
-              <td className="px-3 py-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm">{stock.ticker}</span>
+              <td className="px-3 py-[7px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-[12px]" style={{ color: "var(--text-primary)" }}>
+                    {stock.ticker}
+                  </span>
                   {stock.multi_signal_alert && (
                     <span
-                      className="w-1.5 h-1.5 rounded-full animate-pulse"
+                      className="w-[5px] h-[5px] rounded-full"
                       style={{ backgroundColor: "var(--amber)" }}
                     />
                   )}
                 </div>
               </td>
-              <td className="px-3 py-2.5 text-right">
+              <td className="px-3 py-[7px] text-right">
                 <span
-                  className="font-bold font-mono tabular-nums text-sm px-2 py-0.5 rounded"
+                  className="font-bold tabular-nums text-[12px] px-1.5 py-[2px] rounded"
                   style={{
                     color: scoreColor(stock.composite),
-                    backgroundColor: scoreBg(stock.composite),
+                    backgroundColor: stock.composite >= 60
+                      ? `${scoreColor(stock.composite)}18`
+                      : "transparent",
+                    fontFamily: "var(--font-mono)",
                   }}
                 >
                   {stock.composite.toFixed(1)}
@@ -156,22 +126,22 @@ export function StockTable({
                 return (
                   <td
                     key={key}
-                    className="px-3 py-2.5 text-right font-mono tabular-nums text-xs"
-                    style={{ color: scoreColor(raw) }}
+                    className="px-3 py-[7px] text-right tabular-nums"
+                    style={{ color: scoreColor(raw), fontFamily: "var(--font-mono)", fontSize: "11px" }}
                   >
                     {raw.toFixed(0)}
                   </td>
                 );
               })}
-              <td className="px-3 py-2.5 text-right">
+              <td className="px-3 py-[7px] text-right">
                 {(() => {
                   const early = stock.early_detection?.score ?? 0;
                   return (
                     <span
-                      className="text-xs font-mono tabular-nums font-bold px-1.5 py-0.5 rounded"
+                      className="tabular-nums text-[11px] font-bold"
                       style={{
-                        color: early >= 65 ? "#22c55e" : "var(--text-muted)",
-                        backgroundColor: early >= 65 ? "rgba(34,197,94,0.12)" : "transparent",
+                        color: early >= 65 ? "var(--green)" : "var(--text-muted)",
+                        fontFamily: "var(--font-mono)",
                       }}
                     >
                       {early.toFixed(0)}
@@ -179,14 +149,12 @@ export function StockTable({
                   );
                 })()}
               </td>
-              <td className="px-3 py-2.5 text-center">
+              <td className="px-3 py-[7px] text-center">
                 <span
-                  className="text-xs font-mono tabular-nums"
+                  className="tabular-nums text-[11px]"
                   style={{
-                    color:
-                      stock.signals_above_60 >= 3
-                        ? "var(--amber)"
-                        : "var(--text-secondary)",
+                    color: stock.signals_above_60 >= 3 ? "var(--amber)" : "var(--text-muted)",
+                    fontFamily: "var(--font-mono)",
                   }}
                 >
                   {stock.signals_above_60}/5
@@ -197,5 +165,32 @@ export function StockTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+function Th({
+  children,
+  align = "left",
+  onClick,
+  muted,
+  accent,
+}: {
+  children: React.ReactNode;
+  align?: "left" | "right" | "center";
+  onClick?: () => void;
+  muted?: boolean;
+  accent?: boolean;
+}) {
+  return (
+    <th
+      className={`px-3 py-[6px] text-[10px] uppercase tracking-[0.08em] font-medium whitespace-nowrap ${onClick ? "cursor-pointer select-none" : ""}`}
+      style={{
+        textAlign: align,
+        color: accent ? "var(--green)" : muted ? "var(--text-muted)" : "var(--text-secondary)",
+      }}
+      onClick={onClick}
+    >
+      {children}
+    </th>
   );
 }

@@ -1,50 +1,44 @@
 "use client";
 
 const SOURCE_COLORS: Record<string, string> = {
-  yahoo_gainers: "#7c3aed",
-  yahoo_active: "#6366f1",
-  yahoo_smallcap: "#8b5cf6",
-  finviz: "#0ea5e9",
-  reddit: "#f97316",
-  sec_insiders: "#22c55e",
-  rss_feeds: "#eab308",
+  yahoo_gainers: "#2962ff",
+  yahoo_active: "#2962ff",
+  yahoo_smallcap: "#2962ff",
+  finviz: "#26a69a",
+  reddit: "#ff6d00",
+  sec_insiders: "#4dd0c8",
+  rss_feeds: "#787b86",
+  stocktwits: "#ff9800",
 };
 
 const SOURCE_LABELS: Record<string, string> = {
-  yahoo_gainers: "Yahoo Gainers",
-  yahoo_active: "Yahoo Active",
-  yahoo_smallcap: "Yahoo SmallCap",
+  yahoo_gainers: "Gainers",
+  yahoo_active: "Active",
+  yahoo_smallcap: "SmCap",
   finviz: "Finviz",
   reddit: "Reddit",
-  sec_insiders: "SEC Insiders",
-  rss_feeds: "RSS Feeds",
+  sec_insiders: "SEC",
+  rss_feeds: "RSS",
+  stocktwits: "StockTwits",
 };
 
-export function SourceBadges({
-  sources,
-}: {
-  sources: Record<string, string[]>;
-}) {
+export function SourceBadges({ sources }: { sources: Record<string, string[]> }) {
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap gap-1">
       {Object.entries(sources).map(([key, tickers]) => {
         const color = SOURCE_COLORS[key] || "var(--text-muted)";
         return (
           <span
             key={key}
-            className="text-[11px] tracking-wide px-2.5 py-1 rounded-md flex items-center gap-1.5"
+            className="text-[9px] tracking-[0.06em] uppercase px-1.5 py-[2px] rounded flex items-center gap-1"
             style={{
-              border: `1px solid ${color}33`,
-              backgroundColor: `${color}11`,
+              backgroundColor: `${color}14`,
               color,
+              fontFamily: "var(--font-body)",
             }}
           >
-            <span
-              className="w-1.5 h-1.5 rounded-full"
-              style={{ backgroundColor: color }}
-            />
             {SOURCE_LABELS[key] || key}
-            <span className="font-mono font-bold">{tickers.length}</span>
+            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700 }}>{tickers.length}</span>
           </span>
         );
       })}

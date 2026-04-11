@@ -5,7 +5,6 @@ import {
   getDashboard,
   forceScan,
   StockResult,
-  UniverseResponse,
   DashboardResponse,
 } from "@/lib/api";
 import { StockTable } from "@/components/StockTable";
@@ -21,110 +20,73 @@ type Segment = {
 
 function segmentStocks(stocks: StockResult[]): Segment[] {
   const segments: Segment[] = [];
+  const used = new Set<string>();
 
-  // EARLY STAGE
-  const earlyStage = stocks
-    .filter((s) => s.early_detection && s.early_detection.score >= 65)
-    .sort((a, b) => (b.early_detection?.score ?? 0) - (a.early_detection?.score ?? 0));
-  if (earlyStage.length > 0) {
-    segments.push({
-      title: "Early Stage Potential",
-      description: "Improving fundamentals + depressed price = catch the wave before it breaks",
-      color: "#22c55e",
-      stocks: earlyStage,
-    });
-  }
-  const earlyTickers = new Set(earlyStage.map((s) => s.ticker));
-
-  // Multi-signal alerts
-  const alerts = stocks.filter((s) => s.multi_signal_alert && !earlyTickers.has(s.ticker));
-  if (alerts.length > 0) {
-    segments.push({
-      title: "Multi-Signal Alerts",
-      description: "3+ scoring dimensions above 60 — strongest alignment",
-      color: "var(--amber)",
-      stocks: alerts,
-    });
+  function add(title: string, desc: string, color: string, filter: (s: StockResult) => boolean) {
+    const matched = stocks.filter((s) => !used.has(s.ticker) && filter(s));
+    if (matched.length > 0) {
+      segments.push({ title, description: desc, color, stocks: matched });
+      matched.forEach((s) => used.add(s.ticker));
+    }
   }
 
-  const usedTickers = new Set([...earlyTickers, ...alerts.map((s) => s.ticker)]);
-
-  // Lagging peers (competitors ran, this one hasn't)
-  const laggingPeers = stocks.filter(
-    (s) => !usedTickers.has(s.ticker) && s.competitors?.lagging && s.competitors.gap_3m > 20
+  add(
+    "Early Stage Potential",
+    "Improving fundamentals + depressed price — catch the wave before it breaks",
+    "var(--green)",
+    (s) => (s.early_detection?.score ?? 0) >= 65
   );
-  if (laggingPeers.length > 0) {
-    segments.push({
-      title: "Lagging Peers — Catch-Up Plays",
-      description: "Competitors already moved, this stock hasn't — potential to follow",
-      color: "#f59e0b",
-      stocks: laggingPeers,
-    });
-  }
-  const usedTickers2 = new Set([...usedTickers, ...laggingPeers.map((s) => s.ticker)]);
 
-  // Momentum leaders
-  const momentumLeaders = stocks.filter(
-    (s) => !usedTickers2.has(s.ticker) && s.breakdown.momentum.raw >= 70
+  add(
+    "Multi-Signal Alerts",
+    "3+ scoring dimensions above 60 — strongest alignment",
+    "var(--amber)",
+    (s) => s.multi_signal_alert
   );
-  if (momentumLeaders.length > 0) {
-    segments.push({
-      title: "Momentum Leaders",
-      description: "Strong price action and relative strength",
-      color: "var(--green)",
-      stocks: momentumLeaders,
-    });
-  }
 
-  const usedTickers3 = new Set([...usedTickers2, ...momentumLeaders.map((s) => s.ticker)]);
-
-  // Fundamental strength
-  const fundStrong = stocks.filter(
-    (s) => !usedTickers3.has(s.ticker) && s.breakdown.fundamentals.raw >= 70
+  add(
+    "Lagging Peers",
+    "Competitors already ran — this one might follow",
+    "#ff9800",
+    (s) => !!s.competitors?.lagging && s.competitors.gap_3m > 20
   );
-  if (fundStrong.length > 0) {
-    segments.push({
-      title: "Fundamental Strength",
-      description: "Strong revenue growth, margins, and cash position",
-      color: "var(--accent)",
-      stocks: fundStrong,
-    });
-  }
 
-  const usedTickers4 = new Set([...usedTickers3, ...fundStrong.map((s) => s.ticker)]);
-
-  // Watchlist
-  const watchlist = stocks.filter(
-    (s) => !usedTickers4.has(s.ticker) && s.composite >= 45
+  add(
+    "Momentum Leaders",
+    "Strong price action and relative strength",
+    "var(--green-bright)",
+    (s) => s.breakdown.momentum.raw >= 70
   );
-  if (watchlist.length > 0) {
-    segments.push({
-      title: "Watchlist",
-      description: "Moderate scores — worth monitoring for improvement",
-      color: "var(--text-secondary)",
-      stocks: watchlist,
-    });
-  }
+
+  add(
+    "Fundamental Strength",
+    "Revenue growth, margins, and solid balance sheet",
+    "var(--accent)",
+    (s) => s.breakdown.fundamentals.raw >= 70
+  );
+
+  add(
+    "Watchlist",
+    "Moderate scores — monitoring for improvement",
+    "var(--text-muted)",
+    (s) => s.composite >= 40
+  );
 
   return segments;
 }
-
-const REFRESH_INTERVAL = 60_000; // Check for new data every 60s
 
 export default function Home() {
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
       const d = await getDashboard();
       setData(d);
-      if (d.ranked.length > 0) {
-        setSegments(segmentStocks(d.ranked));
-      }
+      if (d.ranked.length > 0) setSegments(segmentStocks(d.ranked));
       setError(null);
       setLoading(false);
     } catch (e) {
@@ -133,20 +95,14 @@ export default function Home() {
     }
   }, []);
 
-  // Initial load
+  useEffect(() => { fetchData(); }, [fetchData]);
   useEffect(() => {
-    fetchData();
+    const i = setInterval(fetchData, 60_000);
+    return () => clearInterval(i);
   }, [fetchData]);
 
-  // Auto-refresh every 60s
-  useEffect(() => {
-    const interval = setInterval(fetchData, REFRESH_INTERVAL);
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  async function handleForceScan() {
+  async function handleScan() {
     await forceScan();
-    // Poll until scan finishes
     const poll = setInterval(async () => {
       const d = await getDashboard();
       setData(d);
@@ -157,27 +113,20 @@ export default function Home() {
     }, 5000);
   }
 
-  const selectedStock = selectedTicker
-    ? data?.ranked.find((r) => r.ticker === selectedTicker) ?? null
-    : null;
+  const selectedStock = selected ? data?.ranked.find((r) => r.ticker === selected) ?? null : null;
 
-  // Loading — scan in progress, no data yet
-  if (loading || (data?.scan_in_progress && data.ranked.length === 0)) {
+  // Loading
+  if (loading || (data?.scan_in_progress && !data?.ranked.length)) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-5">
+        <div className="flex flex-col items-center gap-4">
           <div
-            className="w-16 h-16 border-[3px] border-t-transparent rounded-full animate-spin"
+            className="w-10 h-10 border-2 border-t-transparent rounded-full animate-spin"
             style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
           />
-          <div className="text-center">
-            <h2 className="text-lg font-semibold tracking-tight mb-1">Stock Discovery</h2>
-            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-              {data?.scan_in_progress
-                ? "First scan running — discovering and scoring stocks..."
-                : "Connecting to API..."}
-            </p>
-          </div>
+          <p className="text-[13px]" style={{ color: "var(--text-secondary)" }}>
+            {data?.scan_in_progress ? "Running first scan..." : "Connecting..."}
+          </p>
         </div>
       </div>
     );
@@ -187,18 +136,11 @@ export default function Home() {
   if (error && !data?.ranked.length) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-4 max-w-md text-center">
-          <div
-            className="w-14 h-14 rounded-full flex items-center justify-center text-xl"
-            style={{ backgroundColor: "var(--red-dim)" }}
-          >
-            !
-          </div>
-          <h2 className="text-lg font-semibold">Connection Error</h2>
-          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{error}</p>
+        <div className="text-center">
+          <p className="text-[13px] mb-3" style={{ color: "var(--red)" }}>{error}</p>
           <button
             onClick={fetchData}
-            className="px-4 py-2 rounded-md text-sm font-medium"
+            className="px-3 py-1.5 rounded text-[12px]"
             style={{ backgroundColor: "var(--accent)", color: "#fff" }}
           >
             Retry
@@ -208,138 +150,123 @@ export default function Home() {
     );
   }
 
-  const nextScanMin = data?.next_scan_in ? Math.ceil(data.next_scan_in / 60) : 0;
+  const nextMin = data?.next_scan_in ? Math.ceil(data.next_scan_in / 60) : 0;
 
   return (
     <div className="min-h-screen">
-      {/* Top bar */}
+      {/* ── Top bar ── */}
       <header
-        className="sticky top-0 z-10 px-6 py-3 flex items-center justify-between"
-        style={{
-          backgroundColor: "var(--bg-surface)",
-          borderBottom: "1px solid var(--border)",
-        }}
+        className="sticky top-0 z-10 flex items-center justify-between h-10 px-4"
+        style={{ backgroundColor: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}
       >
-        <div>
-          <h1 className="text-base font-bold tracking-tight">Stock Discovery</h1>
-          <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-            Auto-scans every 30 min
-            {data?.scan_in_progress && (
-              <span style={{ color: "var(--amber)" }}> — scanning now...</span>
-            )}
-          </p>
+        <div className="flex items-center gap-3">
+          <span className="text-[13px] font-semibold tracking-tight" style={{ letterSpacing: "-0.01em" }}>
+            Stock Discovery
+          </span>
+          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+            {data?.ranked.length ?? 0} stocks
+          </span>
+          {data?.scan_in_progress && (
+            <span className="text-[10px] flex items-center gap-1" style={{ color: "var(--amber)" }}>
+              <span className="w-1 h-1 rounded-full animate-pulse" style={{ backgroundColor: "var(--amber)" }} />
+              scanning
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           {data?.universe && <SourceBadges sources={data.universe.sources} />}
-          <div className="flex items-center gap-2">
-            {data?.last_scan && (
-              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-                Updated {new Date(data.last_scan).toLocaleTimeString()}
-                {nextScanMin > 0 && ` · next in ${nextScanMin}m`}
-              </span>
-            )}
-            <button
-              onClick={handleForceScan}
-              disabled={data?.scan_in_progress}
-              className="px-3 py-1.5 rounded-md text-xs font-medium transition-all active:scale-[0.97]"
-              style={{
-                backgroundColor: data?.scan_in_progress ? "var(--bg-primary)" : "var(--bg-surface-hover)",
-                color: data?.scan_in_progress ? "var(--text-muted)" : "var(--text-secondary)",
-                border: "1px solid var(--border)",
-              }}
-            >
-              {data?.scan_in_progress ? "Scanning..." : "Scan Now"}
-            </button>
-          </div>
+          {data?.last_scan && (
+            <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+              {new Date(data.last_scan).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              {nextMin > 0 && ` · ${nextMin}m`}
+            </span>
+          )}
+          <button
+            onClick={handleScan}
+            disabled={data?.scan_in_progress}
+            className="text-[10px] px-2 py-[3px] rounded transition-colors"
+            style={{
+              backgroundColor: "var(--bg-elevated)",
+              color: "var(--text-secondary)",
+              border: "1px solid var(--border)",
+            }}
+          >
+            Scan
+          </button>
         </div>
       </header>
 
-      {/* Notifications */}
+      {/* ── Notification bars ── */}
       {data?.new_tickers && data.new_tickers.length > 0 && (
         <div
-          className="px-6 py-2 text-xs flex items-center gap-2"
-          style={{ backgroundColor: "rgba(34, 197, 94, 0.08)", borderBottom: "1px solid var(--border)" }}
+          className="h-7 px-4 flex items-center gap-2 text-[11px]"
+          style={{ backgroundColor: "var(--green-dim)", borderBottom: "1px solid var(--border)" }}
         >
-          <span style={{ color: "#22c55e" }}>NEW</span>
-          <span style={{ color: "var(--text-secondary)" }}>
-            {data.new_tickers.join(", ")} appeared since last scan
-          </span>
+          <span className="font-semibold" style={{ color: "var(--green)" }}>NEW</span>
+          <span style={{ color: "var(--text-secondary)" }}>{data.new_tickers.join(", ")}</span>
         </div>
       )}
       {data?.improving && data.improving.length > 0 && (
         <div
-          className="px-6 py-2 text-xs flex items-center gap-2"
+          className="h-7 px-4 flex items-center gap-2 text-[11px]"
           style={{ backgroundColor: "var(--amber-dim)", borderBottom: "1px solid var(--border)" }}
         >
-          <span style={{ color: "var(--amber)" }}>IMPROVING</span>
+          <span className="font-semibold" style={{ color: "var(--amber)" }}>IMPROVING</span>
           <span style={{ color: "var(--text-secondary)" }}>
-            {data.improving.map((i) => `${i.ticker} +${i.change}`).join(", ")}
+            {data.improving.map((i) => `${i.ticker} +${i.change}`).join("  ")}
           </span>
         </div>
       )}
 
-      {/* Stats bar */}
+      {/* ── Stats row ── */}
       <div
-        className="px-6 py-3 flex gap-6"
+        className="flex items-center gap-6 h-12 px-4"
         style={{ borderBottom: "1px solid var(--border)" }}
       >
-        <Stat label="Discovered" value={data?.universe?.total ?? 0} suffix="tickers" />
-        <Stat label="Scored" value={data?.ranked.length ?? 0} suffix="stocks" />
+        <Stat label="Discovered" value={data?.universe?.total ?? 0} />
+        <Stat label="Scored" value={data?.ranked.length ?? 0} />
+        <Stat label="Alerts" value={data?.alerts.length ?? 0} color="var(--amber)" />
         <Stat
-          label="Alerts"
-          value={data?.alerts.length ?? 0}
-          color="var(--amber)"
-        />
-        <Stat
-          label="Early Stage"
+          label="Early"
           value={segments.find((s) => s.title.includes("Early"))?.stocks.length ?? 0}
-          color="#22c55e"
+          color="var(--green)"
         />
         <Stat
-          label="Top Score"
+          label="Top"
           value={data?.ranked.length ? data.ranked[0].composite.toFixed(1) : "—"}
           color="var(--green)"
         />
-        <Stat label="Sources" value={Object.keys(data?.universe?.sources ?? {}).length} />
       </div>
 
-      {/* Segments */}
-      <main className="px-6 py-6 space-y-8">
+      {/* ── Content ── */}
+      <main className="px-4 py-5 space-y-6 max-w-[1400px] mx-auto">
         {segments.map((segment) => (
           <section key={segment.title}>
-            <div className="flex items-center gap-3 mb-3">
-              <span
-                className="w-1 h-6 rounded-full"
-                style={{ backgroundColor: segment.color }}
-              />
-              <div>
-                <h2 className="text-base font-semibold tracking-tight">
-                  {segment.title}
-                  <span
-                    className="text-sm font-normal ml-2"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    {segment.stocks.length}
-                  </span>
-                </h2>
-                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                  {segment.description}
-                </p>
-              </div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-[3px] h-4 rounded-full" style={{ backgroundColor: segment.color }} />
+              <h2 className="text-[13px] font-semibold" style={{ letterSpacing: "-0.01em" }}>
+                {segment.title}
+              </h2>
+              <span className="text-[11px] tabular-nums" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                {segment.stocks.length}
+              </span>
+              <span className="text-[10px] ml-1" style={{ color: "var(--text-muted)" }}>
+                {segment.description}
+              </span>
             </div>
 
             {segment.stocks.length <= 6 ? (
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2">
                 {segment.stocks.map((stock) => (
                   <StockCard key={stock.ticker} stock={stock} />
                 ))}
               </div>
             ) : (
-              <StockTable stocks={segment.stocks} onSelect={setSelectedTicker} />
+              <StockTable stocks={segment.stocks} onSelect={setSelected} />
             )}
 
             {selectedStock && segment.stocks.some((s) => s.ticker === selectedStock.ticker) && (
-              <div className="mt-3">
+              <div className="mt-2">
                 <StockCard stock={selectedStock} />
               </div>
             )}
@@ -349,25 +276,16 @@ export default function Home() {
         {/* Full ranking */}
         {(data?.ranked.length ?? 0) > 0 && (
           <section>
-            <div className="flex items-center gap-3 mb-3">
-              <span className="w-1 h-6 rounded-full" style={{ backgroundColor: "var(--text-muted)" }} />
-              <div>
-                <h2 className="text-base font-semibold tracking-tight">
-                  Full Ranking
-                  <span className="text-sm font-normal ml-2" style={{ color: "var(--text-muted)" }}>
-                    {data?.ranked.length}
-                  </span>
-                </h2>
-                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                  All scored stocks ranked by composite score
-                </p>
-              </div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-[3px] h-4 rounded-full" style={{ backgroundColor: "var(--text-muted)" }} />
+              <h2 className="text-[13px] font-semibold">Full Ranking</h2>
+              <span className="text-[11px] tabular-nums" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                {data?.ranked.length}
+              </span>
             </div>
-            <StockTable stocks={data?.ranked ?? []} onSelect={setSelectedTicker} />
+            <StockTable stocks={data?.ranked ?? []} onSelect={setSelected} />
             {selectedStock && (
-              <div className="mt-3">
-                <StockCard stock={selectedStock} />
-              </div>
+              <div className="mt-2"><StockCard stock={selectedStock} /></div>
             )}
           </section>
         )}
@@ -376,30 +294,18 @@ export default function Home() {
   );
 }
 
-function Stat({
-  label,
-  value,
-  suffix,
-  color,
-}: {
-  label: string;
-  value: number | string;
-  suffix?: string;
-  color?: string;
-}) {
+function Stat({ label, value, color }: { label: string; value: number | string; color?: string }) {
   return (
-    <div>
-      <p className="text-[10px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
         {label}
-      </p>
-      <p className="text-lg font-bold tabular-nums" style={{ color }}>
+      </span>
+      <span
+        className="text-[13px] font-bold tabular-nums"
+        style={{ color: color || "var(--text-primary)", fontFamily: "var(--font-mono)" }}
+      >
         {value}
-        {suffix && (
-          <span className="text-[11px] font-normal ml-1" style={{ color: "var(--text-muted)" }}>
-            {suffix}
-          </span>
-        )}
-      </p>
+      </span>
     </div>
   );
 }

@@ -1,0 +1,33 @@
+# Stock Discovery Universe
+# One ticker per line. Lines starting with # are ignored.
+# Add/remove tickers to customize your scan universe.
+
+# Small-cap tech / growth
+LWLG
+ASTS
+RKLB
+LUNR
+IONQ
+RGTI
+QUBT
+SOUN
+BBAI
+PLTR
+
+# Biotech / clinical stage
+ACHR
+JOBY
+KULR
+GEVO
+
+# Energy / materials
+SMR
+OKLO
+NNE
+LEU
+
+# Other small/mid
+HIMS
+CLOV
+SOFI
+AFRM

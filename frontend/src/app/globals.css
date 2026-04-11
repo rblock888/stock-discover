@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0b0e11;
+  --bg-surface: #141720;
+  --bg-surface-hover: #1a1f2e;
+  --border: #1e2433;
+  --text-primary: #e1e4e8;
+  --text-secondary: #8b949e;
+  --text-muted: #484f58;
+  --green: #26a69a;
+  --green-dim: rgba(38, 166, 154, 0.12);
+  --red: #ef5350;
+  --red-dim: rgba(239, 83, 80, 0.12);
+  --amber: #ff6d00;
+  --amber-dim: rgba(255, 109, 0, 0.12);
+  --accent: #3b82f6;
+  --accent-dim: rgba(59, 130, 246, 0.12);
+}
+
+@theme inline {
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Score bar animation */
+@keyframes scoreBarFill {
+  from { width: 0%; }
+}
+
+.score-bar-fill {
+  animation: scoreBarFill 0.8s ease-out;
+}

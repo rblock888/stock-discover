@@ -11,11 +11,12 @@ import catalysts
 import insiders
 import reddit_sentiment
 import scorer
+import universe_builder
 
 st.set_page_config(page_title="Stock Discovery", page_icon="📊", layout="wide")
 
 st.title("Stock Discovery Tool")
-st.caption("Find stocks with multi-signal alignment for potential rerating")
+st.caption("Auto-discovers and scores stocks for multi-signal rerating potential")
 
 # --- Sidebar config ---
 with st.sidebar:
@@ -48,32 +49,49 @@ with st.sidebar:
     config.MAX_PRICE = st.number_input("Max price ($)", value=50.0, step=5.0)
     config.MIN_AVG_VOLUME = st.number_input("Min avg volume", value=100_000, step=50_000)
 
-# --- Ticker input ---
-col1, col2 = st.columns([3, 1])
-with col1:
+    st.divider()
+    st.subheader("Discovery Sources")
+    use_yahoo = st.checkbox("Yahoo Finance screeners", value=True)
+    use_finviz = st.checkbox("Finviz screener", value=True)
+    use_reddit = st.checkbox("Reddit trending", value=True)
+    use_sec = st.checkbox("SEC insider buys", value=True)
+    use_rss = st.checkbox("RSS feeds (news/filings)", value=True)
+
+# --- Mode selection ---
+tab_auto, tab_manual = st.tabs(["🔍 Auto-Discovery", "📝 Manual Tickers"])
+
+with tab_manual:
     ticker_input = st.text_area(
         "Enter tickers (comma or space separated)",
         value="LWLG, ASTS, RKLB, LUNR, IONQ, RGTI, SOUN, BBAI, HIMS, SOFI",
         height=68,
     )
-with col2:
-    st.write("")
-    st.write("")
-    run_button = st.button("🔍 Run Discovery", type="primary", use_container_width=True)
+    run_manual = st.button("Run Manual Scan", type="primary", use_container_width=True)
+
+with tab_auto:
+    st.markdown("""
+    Auto-discovery pulls candidates from multiple sources:
+    - **Yahoo Finance** — daily gainers, most active, small-cap movers
+    - **Finviz** — screened by fundamentals (revenue growth, volume, market cap)
+    - **Reddit** — trending tickers across finance subreddits
+    - **SEC EDGAR** — recent insider purchase filings
+    - **RSS feeds** — PR Newswire, GlobeNewsWire, SEC filings
+
+    Tickers found in **multiple sources** are prioritized.
+    """)
+    run_auto = st.button("🚀 Run Auto-Discovery", type="primary", use_container_width=True)
 
 
 def parse_tickers(text: str) -> list:
-    """Parse tickers from comma/space/newline separated input."""
     tickers = []
     for part in text.replace(",", " ").replace("\n", " ").split():
         t = part.strip().upper()
         if t and t.isalpha():
             tickers.append(t)
-    return list(dict.fromkeys(tickers))  # dedupe preserving order
+    return list(dict.fromkeys(tickers))
 
 
 def filter_ticker(ticker: str) -> tuple:
-    """Check if a ticker passes filters."""
     import yfinance as yf
     try:
         stock = yf.Ticker(ticker)
@@ -94,7 +112,6 @@ def filter_ticker(ticker: str) -> tuple:
 
 
 def score_single(ticker: str) -> tuple:
-    """Score one ticker across all buckets."""
     bucket_scores = {
         "fundamentals": fundamentals.score(ticker),
         "momentum": momentum.score(ticker),
@@ -106,16 +123,17 @@ def score_single(ticker: str) -> tuple:
     return ticker, result
 
 
-if run_button:
-    tickers = parse_tickers(ticker_input)
+def run_scoring(tickers: list, skip_filter: bool = False):
+    """Filter and score a list of tickers, display results."""
     if not tickers:
-        st.error("No valid tickers entered.")
-        st.stop()
+        st.warning("No tickers to score.")
+        return
 
     # --- Filter phase ---
     if not skip_filter:
         with st.status(f"Filtering {len(tickers)} tickers...", expanded=False) as status:
             filtered = []
+            removed = []
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {pool.submit(filter_ticker, t): t for t in tickers}
                 for future in as_completed(futures):
@@ -123,13 +141,15 @@ if run_button:
                     if passed:
                         filtered.append(t)
                     else:
-                        st.write(f"  ❌ {t}: {reason}")
+                        removed.append(f"{t} ({reason})")
+            if removed:
+                st.write(f"Removed: {', '.join(removed[:20])}")
             status.update(label=f"{len(filtered)}/{len(tickers)} passed filters", state="complete")
         tickers = filtered
 
     if not tickers:
         st.warning("No tickers passed filters.")
-        st.stop()
+        return
 
     # --- Scoring phase ---
     results = {}
@@ -149,7 +169,6 @@ if run_button:
     # --- Results ---
     ranked = scorer.rank_results(results)
 
-    # Summary table
     table_data = []
     for ticker, result in ranked[:top_n]:
         bd = result["breakdown"]
@@ -167,12 +186,10 @@ if run_button:
 
     df = pd.DataFrame(table_data)
 
-    # Alerts
     alerts = [r for r in table_data if r["Alert"]]
     if alerts:
         st.success(f"🚨 **{len(alerts)} multi-signal alert(s):** {', '.join(r['Ticker'] for r in alerts)}")
 
-    # Styled table
     st.subheader(f"Top {min(top_n, len(ranked))} Stocks")
 
     def color_score(val):
@@ -202,7 +219,6 @@ if run_button:
             cols = st.columns(5)
             for i, (bucket, data) in enumerate(bd.items()):
                 with cols[i]:
-                    delta_color = "normal" if data["raw"] >= 50 else "inverse"
                     st.metric(
                         label=bucket.title(),
                         value=f"{data['raw']:.0f}",
@@ -211,3 +227,50 @@ if run_button:
                     if data.get("components"):
                         for k, v in data["components"].items():
                             st.caption(f"**{k}:** {v}")
+
+
+# --- Execute based on mode ---
+if run_auto:
+    with st.status("🔍 Discovering tickers from multiple sources...", expanded=True) as status:
+        log_container = st.empty()
+        logs = []
+
+        def log_callback(msg):
+            logs.append(msg)
+            log_container.text("\n".join(logs))
+
+        universe = universe_builder.build_universe(
+            use_yahoo=use_yahoo,
+            use_finviz=use_finviz,
+            use_reddit=use_reddit,
+            use_sec=use_sec,
+            use_rss=use_rss,
+            callback=log_callback,
+        )
+
+        tickers = universe["tickers"]
+        source_counts = universe["source_counts"]
+
+        # Show source breakdown
+        multi_source = [t for t, c in source_counts.items() if c >= 2]
+        log_callback(f"\n  Total unique tickers: {universe['total']}")
+        if multi_source:
+            log_callback(f"  Multi-source tickers: {', '.join(multi_source[:20])}")
+
+        status.update(
+            label=f"Found {universe['total']} tickers from {len(universe['sources'])} sources",
+            state="complete",
+        )
+
+    if tickers:
+        st.info(f"Discovered **{len(tickers)}** tickers. Scoring top candidates...")
+        run_scoring(tickers, skip_filter=skip_filter)
+    else:
+        st.warning("No tickers discovered. Try enabling more sources.")
+
+if run_manual:
+    tickers = parse_tickers(ticker_input)
+    if not tickers:
+        st.error("No valid tickers entered.")
+    else:
+        run_scoring(tickers, skip_filter=skip_filter)

@@ -5,3 +5,4 @@ praw>=7.7
 textblob>=0.17
 requests>=2.31
 tabulate>=0.9
+streamlit>=1.30

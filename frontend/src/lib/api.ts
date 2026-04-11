@@ -119,6 +119,25 @@ export async function scoreSingle(ticker: string): Promise<StockResult> {
   return fetcher(`/api/score/${ticker}`);
 }
 
+export interface DashboardResponse {
+  universe: UniverseResponse | null;
+  ranked: StockResult[];
+  alerts: string[];
+  new_tickers: string[];
+  improving: { ticker: string; old_score: number; new_score: number; change: number }[];
+  last_scan: string | null;
+  scan_in_progress: boolean;
+  next_scan_in: number;
+}
+
+export async function getDashboard(): Promise<DashboardResponse> {
+  return fetcher("/api/dashboard");
+}
+
+export async function forceScan(): Promise<{ status: string }> {
+  return fetcher("/api/scan", { method: "POST" });
+}
+
 export async function getConfig(): Promise<ConfigResponse> {
   return fetcher("/api/config");
 }

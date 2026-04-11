@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
-  discover,
-  scoreTickers,
+  getDashboard,
+  forceScan,
   StockResult,
   UniverseResponse,
+  DashboardResponse,
 } from "@/lib/api";
 import { StockTable } from "@/components/StockTable";
 import { StockCard } from "@/components/StockCard";
@@ -21,7 +22,7 @@ type Segment = {
 function segmentStocks(stocks: StockResult[]): Segment[] {
   const segments: Segment[] = [];
 
-  // EARLY STAGE — High early detection score (the money segment)
+  // EARLY STAGE
   const earlyStage = stocks
     .filter((s) => s.early_detection && s.early_detection.score >= 65)
     .sort((a, b) => (b.early_detection?.score ?? 0) - (a.early_detection?.score ?? 0));
@@ -35,7 +36,7 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
   }
   const earlyTickers = new Set(earlyStage.map((s) => s.ticker));
 
-  // Multi-signal alerts (3+ buckets above 60)
+  // Multi-signal alerts
   const alerts = stocks.filter((s) => s.multi_signal_alert && !earlyTickers.has(s.ticker));
   if (alerts.length > 0) {
     segments.push({
@@ -46,12 +47,25 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     });
   }
 
-  // Momentum leaders (momentum > 70, not already in above)
-  const alertTickers = new Set([...earlyTickers, ...alerts.map((s) => s.ticker)]);
+  const usedTickers = new Set([...earlyTickers, ...alerts.map((s) => s.ticker)]);
+
+  // Lagging peers (competitors ran, this one hasn't)
+  const laggingPeers = stocks.filter(
+    (s) => !usedTickers.has(s.ticker) && s.competitors?.lagging && s.competitors.gap_3m > 20
+  );
+  if (laggingPeers.length > 0) {
+    segments.push({
+      title: "Lagging Peers — Catch-Up Plays",
+      description: "Competitors already moved, this stock hasn't — potential to follow",
+      color: "#f59e0b",
+      stocks: laggingPeers,
+    });
+  }
+  const usedTickers2 = new Set([...usedTickers, ...laggingPeers.map((s) => s.ticker)]);
+
+  // Momentum leaders
   const momentumLeaders = stocks.filter(
-    (s) =>
-      !alertTickers.has(s.ticker) &&
-      s.breakdown.momentum.raw >= 70
+    (s) => !usedTickers2.has(s.ticker) && s.breakdown.momentum.raw >= 70
   );
   if (momentumLeaders.length > 0) {
     segments.push({
@@ -62,15 +76,11 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     });
   }
 
-  // Fundamental strength (fundamentals > 70, not in above)
-  const usedTickers = new Set([
-    ...alertTickers,
-    ...momentumLeaders.map((s) => s.ticker),
-  ]);
+  const usedTickers3 = new Set([...usedTickers2, ...momentumLeaders.map((s) => s.ticker)]);
+
+  // Fundamental strength
   const fundStrong = stocks.filter(
-    (s) =>
-      !usedTickers.has(s.ticker) &&
-      s.breakdown.fundamentals.raw >= 70
+    (s) => !usedTickers3.has(s.ticker) && s.breakdown.fundamentals.raw >= 70
   );
   if (fundStrong.length > 0) {
     segments.push({
@@ -81,70 +91,11 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     });
   }
 
-  // Catalyst plays (catalyst > 65, not in above)
-  const usedTickers2 = new Set([
-    ...usedTickers,
-    ...fundStrong.map((s) => s.ticker),
-  ]);
-  const catalystPlays = stocks.filter(
-    (s) =>
-      !usedTickers2.has(s.ticker) &&
-      s.breakdown.catalyst.raw >= 65
-  );
-  if (catalystPlays.length > 0) {
-    segments.push({
-      title: "Catalyst Plays",
-      description: "Upcoming earnings, analyst upgrades, or news flow",
-      color: "#a78bfa",
-      stocks: catalystPlays,
-    });
-  }
+  const usedTickers4 = new Set([...usedTickers3, ...fundStrong.map((s) => s.ticker)]);
 
-  // Insider activity (insider > 65, not in above)
-  const usedTickers3 = new Set([
-    ...usedTickers2,
-    ...catalystPlays.map((s) => s.ticker),
-  ]);
-  const insiderBuying = stocks.filter(
-    (s) =>
-      !usedTickers3.has(s.ticker) &&
-      s.breakdown.insider.raw >= 65
-  );
-  if (insiderBuying.length > 0) {
-    segments.push({
-      title: "Insider Activity",
-      description: "Notable insider buying or tight ownership structure",
-      color: "#22c55e",
-      stocks: insiderBuying,
-    });
-  }
-
-  // Social buzz (sentiment > 65, not in above)
-  const usedTickers4 = new Set([
-    ...usedTickers3,
-    ...insiderBuying.map((s) => s.ticker),
-  ]);
-  const socialBuzz = stocks.filter(
-    (s) =>
-      !usedTickers4.has(s.ticker) &&
-      s.breakdown.sentiment.raw >= 65
-  );
-  if (socialBuzz.length > 0) {
-    segments.push({
-      title: "Social Buzz",
-      description: "Rising Reddit mentions with positive sentiment",
-      color: "#f97316",
-      stocks: socialBuzz,
-    });
-  }
-
-  // Watchlist (remaining with composite > 45)
-  const allUsed = new Set([
-    ...usedTickers4,
-    ...socialBuzz.map((s) => s.ticker),
-  ]);
+  // Watchlist
   const watchlist = stocks.filter(
-    (s) => !allUsed.has(s.ticker) && s.composite >= 45
+    (s) => !usedTickers4.has(s.ticker) && s.composite >= 45
   );
   if (watchlist.length > 0) {
     segments.push({
@@ -158,114 +109,82 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
   return segments;
 }
 
-type Phase =
-  | "discovering"
-  | "filtering"
-  | "scoring"
-  | "done"
-  | "error";
+const REFRESH_INTERVAL = 60_000; // Check for new data every 60s
 
 export default function Home() {
-  const [phase, setPhase] = useState<Phase>("discovering");
-  const [statusText, setStatusText] = useState("Scanning sources...");
-  const [universe, setUniverse] = useState<UniverseResponse | null>(null);
-  const [results, setResults] = useState<StockResult[]>([]);
+  const [data, setData] = useState<DashboardResponse | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<string>("");
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
-  const runPipeline = useCallback(async () => {
-    setPhase("discovering");
-    setStatusText("Scanning Yahoo, Finviz, Reddit, SEC, RSS...");
-    setError(null);
-    setResults([]);
-    setSegments([]);
-
+  const fetchData = useCallback(async () => {
     try {
-      // Step 1: Discover
-      const uni = await discover();
-      setUniverse(uni);
-
-      if (uni.tickers.length === 0) {
-        setError("No tickers discovered from any source.");
-        setPhase("error");
-        return;
+      const d = await getDashboard();
+      setData(d);
+      if (d.ranked.length > 0) {
+        setSegments(segmentStocks(d.ranked));
       }
-
-      // Step 2: Score in small batches (5 at a time to avoid timeouts)
-      setPhase("scoring");
-      const toScore = uni.tickers.slice(0, 30);
-      const batchSize = 5;
-      const allRanked: StockResult[] = [];
-
-      for (let i = 0; i < toScore.length; i += batchSize) {
-        const batch = toScore.slice(i, i + batchSize);
-        setStatusText(
-          `Scoring ${i + batch.length}/${toScore.length}...`
-        );
-
-        try {
-          const scoreRes = await scoreTickers(batch, true);
-          allRanked.push(...scoreRes.ranked);
-
-          // Sort and update progressively
-          allRanked.sort((a, b) => b.composite - a.composite);
-          setResults([...allRanked]);
-          setSegments(segmentStocks([...allRanked]));
-        } catch {
-          // Skip failed batch, continue with rest
-        }
-      }
-
-      setLastUpdated(new Date().toLocaleTimeString());
-      setPhase("done");
+      setError(null);
+      setLoading(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect to API");
-      setPhase("error");
+      setError(e instanceof Error ? e.message : "Failed to connect");
+      setLoading(false);
     }
   }, []);
 
-  // Auto-run on mount
+  // Initial load
   useEffect(() => {
-    runPipeline();
-  }, [runPipeline]);
+    fetchData();
+  }, [fetchData]);
+
+  // Auto-refresh every 60s
+  useEffect(() => {
+    const interval = setInterval(fetchData, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  async function handleForceScan() {
+    await forceScan();
+    // Poll until scan finishes
+    const poll = setInterval(async () => {
+      const d = await getDashboard();
+      setData(d);
+      if (!d.scan_in_progress && d.ranked.length > 0) {
+        setSegments(segmentStocks(d.ranked));
+        clearInterval(poll);
+      }
+    }, 5000);
+  }
 
   const selectedStock = selectedTicker
-    ? results.find((r) => r.ticker === selectedTicker) ?? null
+    ? data?.ranked.find((r) => r.ticker === selectedTicker) ?? null
     : null;
 
-  // Loading state
-  if (phase === "discovering" || phase === "scoring" || phase === "filtering") {
+  // Loading — scan in progress, no data yet
+  if (loading || (data?.scan_in_progress && data.ranked.length === 0)) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="flex flex-col items-center gap-5">
-          <div className="relative">
-            <div
-              className="w-16 h-16 border-[3px] border-t-transparent rounded-full animate-spin"
-              style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
-            />
-          </div>
+          <div
+            className="w-16 h-16 border-[3px] border-t-transparent rounded-full animate-spin"
+            style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
+          />
           <div className="text-center">
-            <h2 className="text-lg font-semibold tracking-tight mb-1">
-              Stock Discovery
-            </h2>
+            <h2 className="text-lg font-semibold tracking-tight mb-1">Stock Discovery</h2>
             <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-              {statusText}
+              {data?.scan_in_progress
+                ? "First scan running — discovering and scoring stocks..."
+                : "Connecting to API..."}
             </p>
           </div>
-          {universe && (
-            <div className="mt-2">
-              <SourceBadges sources={universe.sources} />
-            </div>
-          )}
         </div>
       </div>
     );
   }
 
-  // Error state
-  if (phase === "error") {
+  // Error
+  if (error && !data?.ranked.length) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="flex flex-col items-center gap-4 max-w-md text-center">
@@ -276,12 +195,10 @@ export default function Home() {
             !
           </div>
           <h2 className="text-lg font-semibold">Connection Error</h2>
-          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-            {error}
-          </p>
+          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{error}</p>
           <button
-            onClick={runPipeline}
-            className="px-4 py-2 rounded-md text-sm font-medium mt-2"
+            onClick={fetchData}
+            className="px-4 py-2 rounded-md text-sm font-medium"
             style={{ backgroundColor: "var(--accent)", color: "#fff" }}
           >
             Retry
@@ -291,7 +208,8 @@ export default function Home() {
     );
   }
 
-  // Dashboard
+  const nextScanMin = data?.next_scan_in ? Math.ceil(data.next_scan_in / 60) : 0;
+
   return (
     <div className="min-h-screen">
       {/* Top bar */}
@@ -305,55 +223,84 @@ export default function Home() {
         <div>
           <h1 className="text-base font-bold tracking-tight">Stock Discovery</h1>
           <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-            {results.length} stocks scored across {segments.length} segments
+            Auto-scans every 30 min
+            {data?.scan_in_progress && (
+              <span style={{ color: "var(--amber)" }}> — scanning now...</span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-4">
-          {universe && <SourceBadges sources={universe.sources} />}
+          {data?.universe && <SourceBadges sources={data.universe.sources} />}
           <div className="flex items-center gap-2">
-            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-              Updated {lastUpdated}
-            </span>
+            {data?.last_scan && (
+              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                Updated {new Date(data.last_scan).toLocaleTimeString()}
+                {nextScanMin > 0 && ` · next in ${nextScanMin}m`}
+              </span>
+            )}
             <button
-              onClick={runPipeline}
+              onClick={handleForceScan}
+              disabled={data?.scan_in_progress}
               className="px-3 py-1.5 rounded-md text-xs font-medium transition-all active:scale-[0.97]"
               style={{
-                backgroundColor: "var(--bg-surface-hover)",
-                color: "var(--text-secondary)",
+                backgroundColor: data?.scan_in_progress ? "var(--bg-primary)" : "var(--bg-surface-hover)",
+                color: data?.scan_in_progress ? "var(--text-muted)" : "var(--text-secondary)",
                 border: "1px solid var(--border)",
               }}
             >
-              Refresh
+              {data?.scan_in_progress ? "Scanning..." : "Scan Now"}
             </button>
           </div>
         </div>
       </header>
+
+      {/* Notifications */}
+      {data?.new_tickers && data.new_tickers.length > 0 && (
+        <div
+          className="px-6 py-2 text-xs flex items-center gap-2"
+          style={{ backgroundColor: "rgba(34, 197, 94, 0.08)", borderBottom: "1px solid var(--border)" }}
+        >
+          <span style={{ color: "#22c55e" }}>NEW</span>
+          <span style={{ color: "var(--text-secondary)" }}>
+            {data.new_tickers.join(", ")} appeared since last scan
+          </span>
+        </div>
+      )}
+      {data?.improving && data.improving.length > 0 && (
+        <div
+          className="px-6 py-2 text-xs flex items-center gap-2"
+          style={{ backgroundColor: "var(--amber-dim)", borderBottom: "1px solid var(--border)" }}
+        >
+          <span style={{ color: "var(--amber)" }}>IMPROVING</span>
+          <span style={{ color: "var(--text-secondary)" }}>
+            {data.improving.map((i) => `${i.ticker} +${i.change}`).join(", ")}
+          </span>
+        </div>
+      )}
 
       {/* Stats bar */}
       <div
         className="px-6 py-3 flex gap-6"
         style={{ borderBottom: "1px solid var(--border)" }}
       >
-        <Stat
-          label="Discovered"
-          value={universe?.total ?? 0}
-          suffix="tickers"
-        />
-        <Stat label="Scored" value={results.length} suffix="stocks" />
+        <Stat label="Discovered" value={data?.universe?.total ?? 0} suffix="tickers" />
+        <Stat label="Scored" value={data?.ranked.length ?? 0} suffix="stocks" />
         <Stat
           label="Alerts"
-          value={results.filter((r) => r.multi_signal_alert).length}
+          value={data?.alerts.length ?? 0}
           color="var(--amber)"
         />
         <Stat
-          label="Top Score"
-          value={results.length > 0 ? results[0].composite.toFixed(1) : "—"}
-          color="var(--green)"
+          label="Early Stage"
+          value={segments.find((s) => s.title.includes("Early"))?.stocks.length ?? 0}
+          color="#22c55e"
         />
         <Stat
-          label="Sources"
-          value={Object.keys(universe?.sources ?? {}).length}
+          label="Top Score"
+          value={data?.ranked.length ? data.ranked[0].composite.toFixed(1) : "—"}
+          color="var(--green)"
         />
+        <Stat label="Sources" value={Object.keys(data?.universe?.sources ?? {}).length} />
       </div>
 
       {/* Segments */}
@@ -375,71 +322,55 @@ export default function Home() {
                     {segment.stocks.length}
                   </span>
                 </h2>
-                <p
-                  className="text-[11px]"
-                  style={{ color: "var(--text-secondary)" }}
-                >
+                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
                   {segment.description}
                 </p>
               </div>
             </div>
 
-            {segment.stocks.length <= 5 ? (
+            {segment.stocks.length <= 6 ? (
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
                 {segment.stocks.map((stock) => (
                   <StockCard key={stock.ticker} stock={stock} />
                 ))}
               </div>
             ) : (
-              <StockTable
-                stocks={segment.stocks}
-                onSelect={setSelectedTicker}
-              />
+              <StockTable stocks={segment.stocks} onSelect={setSelectedTicker} />
             )}
 
-            {selectedStock &&
-              segment.stocks.some(
-                (s) => s.ticker === selectedStock.ticker
-              ) && (
-                <div className="mt-3">
-                  <StockCard stock={selectedStock} />
-                </div>
-              )}
+            {selectedStock && segment.stocks.some((s) => s.ticker === selectedStock.ticker) && (
+              <div className="mt-3">
+                <StockCard stock={selectedStock} />
+              </div>
+            )}
           </section>
         ))}
 
-        {/* Full ranking at bottom */}
-        <section>
-          <div className="flex items-center gap-3 mb-3">
-            <span
-              className="w-1 h-6 rounded-full"
-              style={{ backgroundColor: "var(--text-muted)" }}
-            />
-            <div>
-              <h2 className="text-base font-semibold tracking-tight">
-                Full Ranking
-                <span
-                  className="text-sm font-normal ml-2"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  {results.length}
-                </span>
-              </h2>
-              <p
-                className="text-[11px]"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                All scored stocks ranked by composite score
-              </p>
+        {/* Full ranking */}
+        {(data?.ranked.length ?? 0) > 0 && (
+          <section>
+            <div className="flex items-center gap-3 mb-3">
+              <span className="w-1 h-6 rounded-full" style={{ backgroundColor: "var(--text-muted)" }} />
+              <div>
+                <h2 className="text-base font-semibold tracking-tight">
+                  Full Ranking
+                  <span className="text-sm font-normal ml-2" style={{ color: "var(--text-muted)" }}>
+                    {data?.ranked.length}
+                  </span>
+                </h2>
+                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                  All scored stocks ranked by composite score
+                </p>
+              </div>
             </div>
-          </div>
-          <StockTable stocks={results} onSelect={setSelectedTicker} />
-          {selectedStock && (
-            <div className="mt-3">
-              <StockCard stock={selectedStock} />
-            </div>
-          )}
-        </section>
+            <StockTable stocks={data?.ranked ?? []} onSelect={setSelectedTicker} />
+            {selectedStock && (
+              <div className="mt-3">
+                <StockCard stock={selectedStock} />
+              </div>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );
@@ -458,19 +389,13 @@ function Stat({
 }) {
   return (
     <div>
-      <p
-        className="text-[10px] uppercase tracking-[0.08em]"
-        style={{ color: "var(--text-muted)" }}
-      >
+      <p className="text-[10px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
         {label}
       </p>
       <p className="text-lg font-bold tabular-nums" style={{ color }}>
         {value}
         {suffix && (
-          <span
-            className="text-[11px] font-normal ml-1"
-            style={{ color: "var(--text-muted)" }}
-          >
+          <span className="text-[11px] font-normal ml-1" style={{ color: "var(--text-muted)" }}>
             {suffix}
           </span>
         )}

@@ -1,12 +1,14 @@
 """FastAPI backend for the Stock Discovery Tool."""
 
 import asyncio
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from datetime import datetime
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import json
 
 import config
 import fmp
@@ -20,12 +22,118 @@ import reddit_sentiment
 import scorer
 import universe_builder
 
+logger = logging.getLogger("discovery")
 pool = ThreadPoolExecutor(max_workers=5)
+
+# --- Cache ---
+SCAN_INTERVAL = 30 * 60  # 30 minutes
+
+cache = {
+    "universe": None,
+    "results": None,
+    "ranked": [],
+    "alerts": [],
+    "last_scan": None,
+    "scan_in_progress": False,
+    "new_since_last": [],  # tickers that appeared since last scan
+    "history": [],  # track score changes over time
+}
+
+
+def _run_full_pipeline():
+    """Run the full discover → score pipeline. Called by background task."""
+    logger.info("Starting full pipeline scan...")
+    cache["scan_in_progress"] = True
+
+    try:
+        # Step 1: Discover
+        uni = universe_builder.build_universe()
+        cache["universe"] = uni
+        logger.info(f"Discovered {uni['total']} tickers")
+
+        if not uni["tickers"]:
+            cache["scan_in_progress"] = False
+            return
+
+        # Step 2: Score top 30
+        to_score = uni["tickers"][:30]
+        results = {}
+        for i, ticker in enumerate(to_score):
+            try:
+                result = _score_ticker(ticker)
+                results[ticker] = result
+                logger.info(f"  Scored {i+1}/{len(to_score)}: {ticker} = {result['composite']:.1f}")
+            except Exception as e:
+                logger.error(f"  Failed {ticker}: {e}")
+
+        # Step 3: Rank
+        ranked = sorted(results.items(), key=lambda x: x[1]["composite"], reverse=True)
+        alerts = [t for t, r in ranked if r["multi_signal_alert"]]
+        ranked_list = [{"ticker": t, **r} for t, r in ranked]
+
+        # Step 4: Detect new tickers vs previous scan
+        new_tickers = []
+        if cache["ranked"]:
+            old_tickers = {r["ticker"] for r in cache["ranked"]}
+            new_tickers = [r["ticker"] for r in ranked_list if r["ticker"] not in old_tickers]
+
+        # Step 5: Detect score changes (stocks improving)
+        improving = []
+        if cache["results"]:
+            for ticker, result in results.items():
+                old = cache["results"].get(ticker)
+                if old:
+                    old_score = old.get("composite", 0)
+                    new_score = result["composite"]
+                    if new_score - old_score >= 5:  # improved by 5+ points
+                        improving.append({
+                            "ticker": ticker,
+                            "old_score": old_score,
+                            "new_score": new_score,
+                            "change": round(new_score - old_score, 1),
+                        })
+
+        # Update cache
+        cache["results"] = results
+        cache["ranked"] = ranked_list
+        cache["alerts"] = alerts
+        cache["new_since_last"] = new_tickers
+        cache["improving"] = improving
+        cache["last_scan"] = datetime.now().isoformat()
+        cache["scan_in_progress"] = False
+
+        logger.info(
+            f"Pipeline done: {len(ranked_list)} scored, "
+            f"{len(alerts)} alerts, {len(new_tickers)} new, "
+            f"{len(improving)} improving"
+        )
+
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        cache["scan_in_progress"] = False
+
+
+async def _background_scanner():
+    """Background task that runs the pipeline periodically."""
+    # Run immediately on startup
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(pool, _run_full_pipeline)
+
+    # Then every SCAN_INTERVAL
+    while True:
+        await asyncio.sleep(SCAN_INTERVAL)
+        try:
+            await loop.run_in_executor(pool, _run_full_pipeline)
+        except Exception as e:
+            logger.error(f"Background scan error: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Start background scanner
+    task = asyncio.create_task(_background_scanner())
     yield
+    task.cancel()
     pool.shutdown(wait=False)
 
 
@@ -128,7 +236,52 @@ async def health():
         "status": "ok",
         "fmp_configured": fmp.is_configured(),
         "fmp_key_prefix": fmp.API_KEY[:4] + "..." if fmp.API_KEY else "NOT SET",
+        "last_scan": cache["last_scan"],
+        "scan_in_progress": cache["scan_in_progress"],
+        "cached_results": len(cache["ranked"]),
     }
+
+
+@app.get("/api/dashboard")
+async def dashboard():
+    """
+    Main endpoint — returns cached results instantly.
+    No waiting. Background scanner keeps data fresh.
+    """
+    return {
+        "universe": cache["universe"],
+        "ranked": cache["ranked"],
+        "alerts": cache["alerts"],
+        "new_tickers": cache.get("new_since_last", []),
+        "improving": cache.get("improving", []),
+        "last_scan": cache["last_scan"],
+        "scan_in_progress": cache["scan_in_progress"],
+        "next_scan_in": _next_scan_seconds(),
+    }
+
+
+def _next_scan_seconds() -> int:
+    if not cache["last_scan"]:
+        return 0
+    try:
+        last = datetime.fromisoformat(cache["last_scan"])
+        elapsed = (datetime.now() - last).total_seconds()
+        remaining = max(0, SCAN_INTERVAL - elapsed)
+        return int(remaining)
+    except Exception:
+        return 0
+
+
+@app.post("/api/scan")
+async def force_scan():
+    """Force a new scan immediately."""
+    if cache["scan_in_progress"]:
+        return {"status": "already_running"}
+    loop = asyncio.get_event_loop()
+    asyncio.create_task(
+        loop.run_in_executor(pool, _run_full_pipeline)
+    )
+    return {"status": "started"}
 
 
 @app.get("/api/config")
@@ -181,7 +334,6 @@ async def score_tickers(req: ScoreRequest):
     loop = asyncio.get_event_loop()
     tickers = [t.upper() for t in req.tickers]
 
-    # Filter first if not skipped
     if not req.skip_filter:
         filter_futures = [
             loop.run_in_executor(pool, _filter_ticker, t) for t in tickers
@@ -196,7 +348,6 @@ async def score_tickers(req: ScoreRequest):
     if not passed:
         return {"results": {}, "ranked": [], "filtered_out": filtered_out, "alerts": []}
 
-    # Score
     score_futures = [
         loop.run_in_executor(pool, _score_ticker, t, req.weights) for t in passed
     ]
@@ -206,7 +357,6 @@ async def score_tickers(req: ScoreRequest):
     for ticker, result in zip(passed, score_results):
         results[ticker] = result
 
-    # Rank
     ranked = sorted(results.items(), key=lambda x: x[1]["composite"], reverse=True)
     alerts = [t for t, r in ranked if r["multi_signal_alert"]]
 

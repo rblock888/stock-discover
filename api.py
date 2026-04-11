@@ -14,6 +14,7 @@ import fundamentals
 import momentum
 import catalysts
 import insiders
+import early_detection
 import reddit_sentiment
 import scorer
 import universe_builder
@@ -76,7 +77,13 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         "insider": insiders.score(ticker),
         "sentiment": reddit_sentiment.score(ticker),
     }
-    return scorer.composite_score(bucket_scores)
+    result = scorer.composite_score(bucket_scores)
+
+    # Add early detection / potential score
+    early = early_detection.score(ticker, bucket_scores)
+    result["early_detection"] = early
+
+    return result
 
 
 def _filter_ticker(ticker: str) -> dict:

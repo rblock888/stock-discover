@@ -235,7 +235,20 @@ export function StockCard({ stock }: { stock: StockResult }) {
     >
       {/* Header with chart */}
       <div className="px-4 pt-4 pb-3 flex gap-4">
-        <MiniChart score={stock.composite} />
+        <div className="flex flex-col items-center gap-1">
+          <MiniChart score={stock.composite} />
+          {stock.early_detection && stock.early_detection.score >= 60 && (
+            <span
+              className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-0.5 rounded"
+              style={{
+                backgroundColor: "rgba(34, 197, 94, 0.15)",
+                color: "#22c55e",
+              }}
+            >
+              Early {stock.early_detection.score.toFixed(0)}
+            </span>
+          )}
+        </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-lg font-bold tracking-tight">
@@ -273,6 +286,27 @@ export function StockCard({ stock }: { stock: StockResult }) {
           </div>
         </div>
       </div>
+
+      {/* Early Detection Banner */}
+      {stock.early_detection && stock.early_detection.score >= 50 && (
+        <div
+          className="px-4 py-2 flex flex-wrap gap-1.5"
+          style={{ borderTop: "1px solid var(--border)", backgroundColor: "rgba(34, 197, 94, 0.04)" }}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] mr-1" style={{ color: "#22c55e" }}>
+            Potential
+          </span>
+          {Object.entries(stock.early_detection.components).map(([k, v]) => (
+            <span
+              key={k}
+              className="text-[10px] px-1.5 py-0.5 rounded"
+              style={{ backgroundColor: "rgba(34, 197, 94, 0.1)", color: "var(--text-secondary)" }}
+            >
+              {String(v)}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Pros and Cons */}
       <div

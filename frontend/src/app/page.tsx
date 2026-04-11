@@ -21,8 +21,22 @@ type Segment = {
 function segmentStocks(stocks: StockResult[]): Segment[] {
   const segments: Segment[] = [];
 
+  // EARLY STAGE — High early detection score (the money segment)
+  const earlyStage = stocks
+    .filter((s) => s.early_detection && s.early_detection.score >= 65)
+    .sort((a, b) => (b.early_detection?.score ?? 0) - (a.early_detection?.score ?? 0));
+  if (earlyStage.length > 0) {
+    segments.push({
+      title: "Early Stage Potential",
+      description: "Improving fundamentals + depressed price = catch the wave before it breaks",
+      color: "#22c55e",
+      stocks: earlyStage,
+    });
+  }
+  const earlyTickers = new Set(earlyStage.map((s) => s.ticker));
+
   // Multi-signal alerts (3+ buckets above 60)
-  const alerts = stocks.filter((s) => s.multi_signal_alert);
+  const alerts = stocks.filter((s) => s.multi_signal_alert && !earlyTickers.has(s.ticker));
   if (alerts.length > 0) {
     segments.push({
       title: "Multi-Signal Alerts",
@@ -32,8 +46,8 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     });
   }
 
-  // Momentum leaders (momentum > 70, not already in alerts)
-  const alertTickers = new Set(alerts.map((s) => s.ticker));
+  // Momentum leaders (momentum > 70, not already in above)
+  const alertTickers = new Set([...earlyTickers, ...alerts.map((s) => s.ticker)]);
   const momentumLeaders = stocks.filter(
     (s) =>
       !alertTickers.has(s.ticker) &&

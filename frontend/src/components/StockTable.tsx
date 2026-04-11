@@ -25,7 +25,7 @@ function scoreBg(score: number): string {
   return "var(--red-dim)";
 }
 
-type SortKey = "composite" | typeof BUCKET_KEYS[number] | "signals";
+type SortKey = "composite" | typeof BUCKET_KEYS[number] | "signals" | "early";
 
 export function StockTable({
   stocks,
@@ -45,6 +45,9 @@ export function StockTable({
     } else if (sortKey === "signals") {
       av = a.signals_above_60;
       bv = b.signals_above_60;
+    } else if (sortKey === "early") {
+      av = a.early_detection?.score ?? 0;
+      bv = b.early_detection?.score ?? 0;
     } else {
       av = a.breakdown[sortKey]?.raw ?? 0;
       bv = b.breakdown[sortKey]?.raw ?? 0;
@@ -90,6 +93,13 @@ export function StockTable({
                 {key.slice(0, 4).toUpperCase()}{arrow(key)}
               </th>
             ))}
+            <th
+              className={`${thClass} text-right`}
+              style={{ color: "#22c55e" }}
+              onClick={() => handleSort("early")}
+            >
+              Early{arrow("early")}
+            </th>
             <th
               className={`${thClass} text-center`}
               style={{ color: "var(--text-secondary)" }}
@@ -153,6 +163,22 @@ export function StockTable({
                   </td>
                 );
               })}
+              <td className="px-3 py-2.5 text-right">
+                {(() => {
+                  const early = stock.early_detection?.score ?? 0;
+                  return (
+                    <span
+                      className="text-xs font-mono tabular-nums font-bold px-1.5 py-0.5 rounded"
+                      style={{
+                        color: early >= 65 ? "#22c55e" : "var(--text-muted)",
+                        backgroundColor: early >= 65 ? "rgba(34,197,94,0.12)" : "transparent",
+                      }}
+                    >
+                      {early.toFixed(0)}
+                    </span>
+                  );
+                })()}
+              </td>
               <td className="px-3 py-2.5 text-center">
                 <span
                   className="text-xs font-mono tabular-nums"

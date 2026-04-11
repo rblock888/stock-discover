@@ -33,6 +33,11 @@ export interface StockResult {
   };
   signals_above_60: number;
   multi_signal_alert: boolean;
+  early_detection?: {
+    score: number;
+    components: ScoreComponents;
+    details: string;
+  };
 }
 
 export interface ScoreResponse {

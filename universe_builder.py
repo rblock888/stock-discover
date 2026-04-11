@@ -8,6 +8,7 @@ Sources:
 3. Reddit trending tickers (social attention)
 4. SEC EDGAR recent insider buying
 5. RSS feeds (SEC filings, PR Newswire, GlobeNewsWire)
+6. StockTwits trending tickers
 """
 
 import re
@@ -370,6 +371,19 @@ def from_rss_feeds(max_tickers: int = 100) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Source 7: StockTwits trending tickers
+# ---------------------------------------------------------------------------
+
+def from_stocktwits(max_tickers: int = 30) -> list:
+    """Get trending tickers from StockTwits."""
+    try:
+        import stocktwits
+        return stocktwits.get_trending()[:max_tickers]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main: combine all sources into a deduplicated universe
 # ---------------------------------------------------------------------------
 
@@ -413,6 +427,7 @@ def build_universe(
 
         if use_rss:
             futures[pool.submit(from_rss_feeds)] = "rss_feeds"
+
 
         for future in as_completed(futures):
             source_name = futures[future]

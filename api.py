@@ -15,6 +15,7 @@ import momentum
 import catalysts
 import insiders
 import early_detection
+import competitors
 import reddit_sentiment
 import scorer
 import universe_builder
@@ -82,6 +83,10 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Add early detection / potential score
     early = early_detection.score(ticker, bucket_scores)
     result["early_detection"] = early
+
+    # Add competitor analysis
+    comp = competitors.analyze(ticker)
+    result["competitors"] = comp
 
     return result
 

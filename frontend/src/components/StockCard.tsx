@@ -373,6 +373,85 @@ export function StockCard({ stock }: { stock: StockResult }) {
         </div>
       </div>
 
+      {/* Competitor snapshot */}
+      {stock.competitors?.has_peers && (
+        <div
+          className="px-4 py-2.5"
+          style={{ borderTop: "1px solid var(--border)" }}
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] uppercase tracking-[0.08em] font-semibold" style={{ color: "var(--text-muted)" }}>
+              vs Competitors
+            </span>
+            <span
+              className="text-[10px] font-semibold uppercase tracking-[0.06em] px-1.5 py-0.5 rounded"
+              style={{
+                backgroundColor:
+                  stock.competitors.position === "underdog"
+                    ? "var(--amber-dim)"
+                    : stock.competitors.position === "leader"
+                      ? "var(--green-dim)"
+                      : "var(--accent-dim)",
+                color:
+                  stock.competitors.position === "underdog"
+                    ? "var(--amber)"
+                    : stock.competitors.position === "leader"
+                      ? "var(--green)"
+                      : "var(--accent)",
+              }}
+            >
+              {stock.competitors.position} ({stock.competitors.mcap_rank})
+            </span>
+          </div>
+          <div className="flex gap-3 text-[11px]">
+            <div>
+              <span style={{ color: "var(--text-muted)" }}>This stock: </span>
+              <span style={{ color: stock.competitors.stock_3m >= 0 ? "var(--green)" : "var(--red)" }}>
+                {stock.competitors.stock_3m >= 0 ? "+" : ""}{stock.competitors.stock_3m}%
+              </span>
+            </div>
+            <div>
+              <span style={{ color: "var(--text-muted)" }}>Peers avg: </span>
+              <span style={{ color: stock.competitors.peer_avg_3m >= 0 ? "var(--green)" : "var(--red)" }}>
+                {stock.competitors.peer_avg_3m >= 0 ? "+" : ""}{stock.competitors.peer_avg_3m}%
+              </span>
+            </div>
+            {stock.competitors.lagging && (
+              <span style={{ color: "var(--amber)" }}>
+                Gap: {stock.competitors.gap_3m}% behind
+              </span>
+            )}
+          </div>
+          {stock.competitors.biggest_competitor && (
+            <p className="text-[10px] mt-1" style={{ color: "var(--text-muted)" }}>
+              Biggest: {stock.competitors.biggest_competitor.ticker} ({stock.competitors.biggest_competitor.ratio}x larger)
+            </p>
+          )}
+          {/* Peer performance bars */}
+          <div className="flex gap-1 mt-2 overflow-x-auto">
+            {stock.competitors.peers.slice(0, 5).map((peer) => (
+              <div
+                key={peer.ticker}
+                className="text-center px-2 py-1 rounded min-w-[60px]"
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                <div className="text-[10px] font-semibold">{peer.ticker}</div>
+                <div
+                  className="text-[11px] font-mono font-bold"
+                  style={{ color: peer.ret_3m >= 0 ? "var(--green)" : "var(--red)" }}
+                >
+                  {peer.ret_3m >= 0 ? "+" : ""}{peer.ret_3m}%
+                </div>
+                <div className="text-[9px]" style={{ color: "var(--text-muted)" }}>3m</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Expand for details */}
       <button
         onClick={() => setExpanded(!expanded)}

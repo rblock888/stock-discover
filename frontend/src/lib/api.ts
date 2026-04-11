@@ -38,6 +38,32 @@ export interface StockResult {
     components: ScoreComponents;
     details: string;
   };
+  competitors?: {
+    peers: {
+      ticker: string;
+      name: string;
+      ret_1m: number;
+      ret_3m: number;
+      mcap: number;
+      pct_from_high: number;
+    }[];
+    has_peers: boolean;
+    lagging: boolean;
+    peer_avg_3m: number;
+    stock_3m: number;
+    gap_3m: number;
+    best_peer: string;
+    best_peer_3m: number;
+    position: string;
+    biggest_competitor: {
+      ticker: string;
+      name: string;
+      mcap: number;
+      ratio: number;
+    } | null;
+    mcap_rank: string;
+    details: string;
+  };
 }
 
 export interface ScoreResponse {

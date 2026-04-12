@@ -67,6 +67,8 @@ export function StockTable({
         <thead>
           <tr style={{ backgroundColor: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
             <Th align="left">Ticker</Th>
+            <Th align="right">Price</Th>
+            <Th align="right">MCap</Th>
             <Th align="right" onClick={() => handleSort("composite")}>
               Score{arrow("composite")}
             </Th>
@@ -108,6 +110,16 @@ export function StockTable({
                     />
                   )}
                 </div>
+              </td>
+              <td className="px-3 py-[7px] text-right tabular-nums text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
+                {stock.quote?.price ? `$${stock.quote.price < 10 ? stock.quote.price.toFixed(2) : stock.quote.price.toFixed(1)}` : "—"}
+              </td>
+              <td className="px-3 py-[7px] text-right tabular-nums text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                {stock.quote?.market_cap ? (
+                  stock.quote.market_cap >= 1e9
+                    ? `${(stock.quote.market_cap / 1e9).toFixed(1)}B`
+                    : `${(stock.quote.market_cap / 1e6).toFixed(0)}M`
+                ) : "—"}
               </td>
               <td className="px-3 py-[7px] text-right">
                 <span

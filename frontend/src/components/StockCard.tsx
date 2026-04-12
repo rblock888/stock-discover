@@ -19,6 +19,21 @@ function scoreColor(s: number) {
   return "var(--red)";
 }
 
+function formatMcap(n: number): string {
+  if (!n) return "";
+  if (n >= 1e12) return `$${(n / 1e12).toFixed(1)}T`;
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
+  return `$${(n / 1e3).toFixed(0)}K`;
+}
+
+function formatPrice(n: number): string {
+  if (!n) return "—";
+  if (n >= 100) return `$${n.toFixed(2)}`;
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(3)}`;
+}
+
 function buildThesis(stock: StockResult): string {
   const bits: string[] = [];
   const early = stock.early_detection?.score ?? 0;
@@ -99,10 +114,30 @@ export function StockCard({ stock }: { stock: StockResult }) {
       <div className="flex items-center gap-3 px-4 pt-4 pb-3">
         <TickerLogo ticker={stock.ticker} size={40} />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[17px] font-bold" style={{ letterSpacing: "-0.02em" }}>
               {stock.ticker}
             </span>
+            {stock.quote?.price ? (
+              <span
+                className="text-[13px] font-semibold tabular-nums"
+                style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}
+              >
+                {formatPrice(stock.quote.price)}
+              </span>
+            ) : null}
+            {stock.quote?.change_pct !== undefined && stock.quote.change_pct !== 0 && (
+              <span
+                className="text-[11px] font-semibold tabular-nums"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: stock.quote.change_pct >= 0 ? "var(--green)" : "var(--red)",
+                }}
+              >
+                {stock.quote.change_pct >= 0 ? "+" : ""}
+                {stock.quote.change_pct.toFixed(2)}%
+              </span>
+            )}
             {stock.multi_signal_alert && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
@@ -120,9 +155,26 @@ export function StockCard({ stock }: { stock: StockResult }) {
               </span>
             )}
           </div>
-          <p className="text-[11px] truncate" style={{ color: "var(--text-secondary)" }}>
-            {thesis}
-          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-[11px] truncate" style={{ color: "var(--text-secondary)" }}>
+              {thesis}
+            </p>
+          </div>
+          {stock.quote && (
+            <div className="flex items-center gap-2 mt-1 text-[10px]" style={{ color: "var(--text-muted)" }}>
+              {stock.quote.market_cap > 0 && (
+                <span style={{ fontFamily: "var(--font-mono)" }}>
+                  {formatMcap(stock.quote.market_cap)} mcap
+                </span>
+              )}
+              {stock.quote.sector && <span>· {stock.quote.sector}</span>}
+              {stock.quote.year_low > 0 && stock.quote.year_high > 0 && (
+                <span style={{ fontFamily: "var(--font-mono)" }}>
+                  · {formatPrice(stock.quote.year_low)}–{formatPrice(stock.quote.year_high)}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex gap-3 shrink-0">
           <div className="text-right">

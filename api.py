@@ -191,6 +191,41 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     }
     result = scorer.composite_score(bucket_scores)
 
+    # Add price/market data
+    try:
+        if fmp.is_configured():
+            q = fmp.get_quote(ticker)
+            result["quote"] = {
+                "price": q.get("price", 0),
+                "change_pct": q.get("changesPercentage", 0),
+                "market_cap": q.get("marketCap", 0),
+                "volume": q.get("volume", 0),
+                "avg_volume": q.get("avgVolume", 0),
+                "year_high": q.get("yearHigh", 0),
+                "year_low": q.get("yearLow", 0),
+                "sector": q.get("sector", ""),
+                "name": q.get("name", ticker),
+            }
+        else:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info or {}
+            price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+            prev = info.get("previousClose", price)
+            change_pct = ((price - prev) / prev * 100) if prev else 0
+            result["quote"] = {
+                "price": price,
+                "change_pct": change_pct,
+                "market_cap": info.get("marketCap", 0),
+                "volume": info.get("volume", 0),
+                "avg_volume": info.get("averageVolume", 0),
+                "year_high": info.get("fiftyTwoWeekHigh", 0),
+                "year_low": info.get("fiftyTwoWeekLow", 0),
+                "sector": info.get("sector", ""),
+                "name": info.get("shortName", ticker),
+            }
+    except Exception:
+        result["quote"] = None
+
     # Add early detection / potential score
     early = early_detection.score(ticker, bucket_scores)
     result["early_detection"] = early

@@ -38,6 +38,17 @@ export interface StockResult {
     components: ScoreComponents;
     details: string;
   };
+  quote?: {
+    price: number;
+    change_pct: number;
+    market_cap: number;
+    volume: number;
+    avg_volume: number;
+    year_high: number;
+    year_low: number;
+    sector: string;
+    name: string;
+  };
   ml_score?: number;
   pattern_match?: {
     score: number;

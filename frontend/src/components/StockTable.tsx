@@ -1,6 +1,7 @@
 "use client";
 
 import { StockResult } from "@/lib/api";
+import { TickerLogo } from "./TickerLogo";
 import { useState } from "react";
 
 const BUCKET_KEYS = [
@@ -95,7 +96,8 @@ export function StockTable({
               onClick={() => onSelect?.(stock.ticker)}
             >
               <td className="px-3 py-[7px]">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
+                  <TickerLogo ticker={stock.ticker} size={20} />
                   <span className="font-semibold text-[12px]" style={{ color: "var(--text-primary)" }}>
                     {stock.ticker}
                   </span>

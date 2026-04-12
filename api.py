@@ -10,6 +10,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+
+def _clean(obj):
+    """Recursively convert numpy/pandas types to native Python types."""
+    if obj is None:
+        return None
+    # numpy bool
+    if hasattr(obj, "item") and hasattr(obj, "dtype"):
+        return obj.item()
+    if isinstance(obj, bool):
+        return bool(obj)
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean(x) for x in obj]
+    return obj
+
 import config
 import fmp
 import fundamentals
@@ -321,7 +337,7 @@ async def dashboard():
     Main endpoint — returns cached results instantly.
     No waiting. Background scanner keeps data fresh.
     """
-    return {
+    return _clean({
         "universe": cache["universe"],
         "ranked": cache["ranked"],
         "alerts": cache["alerts"],
@@ -330,7 +346,7 @@ async def dashboard():
         "last_scan": cache["last_scan"],
         "scan_in_progress": cache["scan_in_progress"],
         "next_scan_in": _next_scan_seconds(),
-    }
+    })
 
 
 def _next_scan_seconds() -> int:
@@ -433,12 +449,12 @@ async def score_tickers(req: ScoreRequest):
     ranked = sorted(results.items(), key=lambda x: x[1]["composite"], reverse=True)
     alerts = [t for t, r in ranked if r["multi_signal_alert"]]
 
-    return {
+    return _clean({
         "results": results,
         "ranked": [{"ticker": t, **r} for t, r in ranked],
         "filtered_out": filtered_out,
         "alerts": alerts,
-    }
+    })
 
 
 @app.get("/api/score/{ticker}")
@@ -446,7 +462,7 @@ async def score_single(ticker: str):
     """Score a single ticker."""
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(pool, _score_ticker, ticker.upper())
-    return {"ticker": ticker.upper(), **result}
+    return _clean({"ticker": ticker.upper(), **result})
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import competitors
 import ml_patterns
 import ml_breakout
 import ml_sector
+import news_sentiment
 import reddit_sentiment
 import scorer
 import universe_builder
@@ -187,7 +188,7 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         "momentum": momentum.score(ticker),
         "catalyst": catalysts.score(ticker),
         "insider": insiders.score(ticker),
-        "sentiment": {"score": 0, "details": "Disabled", "components": {}},
+        "sentiment": news_sentiment.score(ticker),
     }
     result = scorer.composite_score(bucket_scores)
 

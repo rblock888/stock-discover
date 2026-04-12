@@ -9,6 +9,7 @@ const BUCKETS = [
   { key: "momentum", label: "Momentum" },
   { key: "catalyst", label: "Catalyst" },
   { key: "insider", label: "Insider" },
+  { key: "sentiment", label: "News" },
 ] as const;
 
 function scoreColor(s: number) {

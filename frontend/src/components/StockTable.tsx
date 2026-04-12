@@ -9,6 +9,7 @@ const BUCKET_KEYS = [
   "momentum",
   "catalyst",
   "insider",
+  "sentiment",
 ] as const;
 
 const COL_LABELS: Record<string, string> = {
@@ -16,7 +17,7 @@ const COL_LABELS: Record<string, string> = {
   momentum: "MOMENTUM",
   catalyst: "CATALYST",
   insider: "INSIDER",
-  sentiment: "SENTIMENT",
+  sentiment: "NEWS",
 };
 
 function scoreColor(score: number): string {

@@ -2,11 +2,11 @@
 
 # --- Scoring weights (must sum to 1.0) ---
 WEIGHTS = {
-    "fundamentals": 0.35,
-    "momentum": 0.28,
-    "catalyst": 0.22,
+    "fundamentals": 0.30,
+    "momentum": 0.25,
+    "catalyst": 0.20,
     "insider": 0.15,
-    "sentiment": 0.0,   # Disabled - Reddit API requires credentials
+    "sentiment": 0.10,  # Now news sentiment via yfinance
 }
 
 # --- Universe filters ---

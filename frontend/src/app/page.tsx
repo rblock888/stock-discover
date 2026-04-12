@@ -32,9 +32,25 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     }
   }
 
+  // AI top picks — highest ML score
+  const aiPicks = [...stocks]
+    .filter((s) => (s.ml_score ?? 0) >= 55)
+    .sort((a, b) => (b.ml_score ?? 0) - (a.ml_score ?? 0))
+    .slice(0, 3);
+  if (aiPicks.length > 0) {
+    segments.push({
+      title: "AI Top Picks",
+      subtitle: "Highest probability setups based on historical pattern matching and breakout models",
+      color: "var(--accent)",
+      view: "hero",
+      stocks: aiPicks,
+    });
+    aiPicks.forEach((s) => used.add(s.ticker));
+  }
+
   // Top 3 picks — biggest hero cards
   const topPicks = [...stocks]
-    .filter((s) => s.composite >= 55 || (s.early_detection?.score ?? 0) >= 65)
+    .filter((s) => !used.has(s.ticker) && (s.composite >= 55 || (s.early_detection?.score ?? 0) >= 65))
     .slice(0, 3);
   if (topPicks.length > 0) {
     segments.push({

@@ -124,20 +124,39 @@ export function StockCard({ stock }: { stock: StockResult }) {
             {thesis}
           </p>
         </div>
-        <div className="text-right shrink-0">
-          <div
-            className="text-[24px] font-bold tabular-nums leading-none"
-            style={{
-              color: scoreColor(stock.composite),
-              fontFamily: "var(--font-mono)",
-              letterSpacing: "-0.02em",
-            }}
-          >
-            {stock.composite.toFixed(0)}
+        <div className="flex gap-3 shrink-0">
+          <div className="text-right">
+            <div
+              className="text-[24px] font-bold tabular-nums leading-none"
+              style={{
+                color: scoreColor(stock.composite),
+                fontFamily: "var(--font-mono)",
+                letterSpacing: "-0.02em",
+              }}
+            >
+              {stock.composite.toFixed(0)}
+            </div>
+            <div className="text-[9px] uppercase tracking-[0.1em] mt-0.5" style={{ color: "var(--text-muted)" }}>
+              Score
+            </div>
           </div>
-          <div className="text-[9px] uppercase tracking-[0.1em] mt-0.5" style={{ color: "var(--text-muted)" }}>
-            Score
-          </div>
+          {stock.ml_score !== undefined && stock.ml_score > 0 && (
+            <div className="text-right pl-3" style={{ borderLeft: "1px solid var(--border)" }}>
+              <div
+                className="text-[20px] font-bold tabular-nums leading-none"
+                style={{
+                  color: scoreColor(stock.ml_score),
+                  fontFamily: "var(--font-mono)",
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                {stock.ml_score.toFixed(0)}
+              </div>
+              <div className="text-[9px] uppercase tracking-[0.1em] mt-0.5" style={{ color: "var(--accent)" }}>
+                AI
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -183,6 +202,115 @@ export function StockCard({ stock }: { stock: StockResult }) {
               <span style={{ color: "var(--text-secondary)" }}>{c}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── ML Predictions ── */}
+      {(stock.breakout || stock.pattern_match) && (
+        <div className="px-4 py-3 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--accent)" }}>
+              AI Prediction
+            </span>
+            {stock.ml_score !== undefined && (
+              <span
+                className="text-[11px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+                style={{
+                  color: scoreColor(stock.ml_score),
+                  backgroundColor: stock.ml_score >= 60 ? scoreColor(stock.ml_score) + "20" : "var(--bg-primary)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                {stock.ml_score.toFixed(0)}
+              </span>
+            )}
+          </div>
+
+          {/* Breakout probability */}
+          {stock.breakout && stock.breakout.score >= 20 && (
+            <div className="flex items-baseline gap-2 text-[11px]">
+              <span style={{ color: "var(--text-muted)" }}>Breakout 60d:</span>
+              <span
+                className="font-bold tabular-nums"
+                style={{
+                  color: stock.breakout.score >= 60 ? "var(--green)" : stock.breakout.score >= 40 ? "var(--amber)" : "var(--text-secondary)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                {stock.breakout.score.toFixed(0)}% prob
+              </span>
+              {stock.breakout.expected_return_pct > 0 && (
+                <span style={{ color: "var(--green)" }}>
+                  +{stock.breakout.expected_return_pct}% exp
+                </span>
+              )}
+              <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                ({stock.breakout.confidence} conf)
+              </span>
+            </div>
+          )}
+
+          {/* Pattern match */}
+          {stock.pattern_match && stock.pattern_match.best_match && stock.pattern_match.score >= 50 && (
+            <div className="text-[11px]">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span style={{ color: "var(--text-muted)" }}>Looks like:</span>
+                <div className="flex items-center gap-1">
+                  <span className="font-bold" style={{ color: "var(--text-primary)" }}>
+                    {stock.pattern_match.best_match}
+                  </span>
+                  <span style={{ color: "var(--green)" }}>
+                    +{stock.pattern_match.matches[0]?.move_pct}%
+                  </span>
+                  <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                    in {stock.pattern_match.matches[0]?.move_days}d
+                  </span>
+                </div>
+                <span className="text-[10px]" style={{ color: "var(--accent)" }}>
+                  {stock.pattern_match.score.toFixed(0)}% match
+                </span>
+              </div>
+              {stock.pattern_match.matches[0]?.thesis && (
+                <p className="text-[10px] italic" style={{ color: "var(--text-muted)" }}>
+                  &ldquo;{stock.pattern_match.matches[0].thesis}&rdquo;
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Sector catch-up */}
+          {stock.sector_momentum && stock.sector_momentum.score >= 30 && (
+            <div className="flex items-baseline gap-2 text-[11px]">
+              <span style={{ color: "var(--text-muted)" }}>Catch-up:</span>
+              <span className="font-bold tabular-nums" style={{ color: "var(--amber)", fontFamily: "var(--font-mono)" }}>
+                {stock.sector_momentum.score.toFixed(0)}%
+              </span>
+              {stock.sector_momentum.expected_catch_up_pct > 0 && (
+                <span style={{ color: "var(--green)" }}>
+                  +{stock.sector_momentum.expected_catch_up_pct}% exp
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Breakout factors */}
+          {stock.breakout?.factors && stock.breakout.factors.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-1">
+              {stock.breakout.factors.slice(0, 3).map((f, i) => (
+                <span
+                  key={i}
+                  className="text-[9px] px-1.5 py-[2px] rounded"
+                  style={{
+                    backgroundColor: "var(--accent-dim)",
+                    color: "var(--accent-bright)",
+                    border: `1px solid var(--accent)40`,
+                  }}
+                >
+                  {f}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

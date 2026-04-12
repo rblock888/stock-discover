@@ -18,6 +18,9 @@ import catalysts
 import insiders
 import early_detection
 import competitors
+import ml_patterns
+import ml_breakout
+import ml_sector
 import reddit_sentiment
 import scorer
 import universe_builder
@@ -195,6 +198,28 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Add competitor analysis
     comp = competitors.analyze(ticker)
     result["competitors"] = comp
+
+    # ─── ML layer ───
+    # 1. Pattern matching vs historical winners
+    pattern = ml_patterns.analyze({**bucket_scores, "early_detection": early})
+    result["pattern_match"] = pattern
+
+    # 2. Breakout probability
+    early_score = early.get("score", 0)
+    breakout = ml_breakout.analyze(bucket_scores, early_score)
+    result["breakout"] = breakout
+
+    # 3. Sector momentum / catch-up prediction
+    sector = ml_sector.analyze(comp, early_score)
+    result["sector_momentum"] = sector
+
+    # Composite ML score (0-100) — weighted combination
+    ml_score = (
+        pattern["score"] * 0.35 +
+        breakout["score"] * 0.45 +
+        sector["score"] * 0.20
+    )
+    result["ml_score"] = round(ml_score, 1)
 
     return result
 

@@ -38,6 +38,37 @@ export interface StockResult {
     components: ScoreComponents;
     details: string;
   };
+  ml_score?: number;
+  pattern_match?: {
+    score: number;
+    best_match: string | null;
+    matches: {
+      ticker: string;
+      similarity: number;
+      move_pct: number;
+      move_days: number;
+      thesis: string;
+    }[];
+    details: string;
+  };
+  breakout?: {
+    score: number;
+    probability: number;
+    confidence: string;
+    expected_return_pct: number;
+    factors: string[];
+    details: string;
+  };
+  sector_momentum?: {
+    score: number;
+    catch_up_probability: number;
+    expected_catch_up_pct: number;
+    strong_peers: number;
+    mega_peers: number;
+    factors: string[];
+    dominance_risk: string;
+    details: string;
+  };
   competitors?: {
     peers: {
       ticker: string;

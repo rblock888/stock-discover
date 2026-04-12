@@ -9,7 +9,6 @@ const BUCKET_KEYS = [
   "momentum",
   "catalyst",
   "insider",
-  "sentiment",
 ] as const;
 
 const COL_LABELS: Record<string, string> = {

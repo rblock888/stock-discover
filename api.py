@@ -187,7 +187,7 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         "momentum": momentum.score(ticker),
         "catalyst": catalysts.score(ticker),
         "insider": insiders.score(ticker),
-        "sentiment": reddit_sentiment.score(ticker),
+        "sentiment": {"score": 0, "details": "Disabled", "components": {}},
     }
     result = scorer.composite_score(bucket_scores)
 

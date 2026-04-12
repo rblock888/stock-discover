@@ -47,7 +47,9 @@ export interface StockResult {
     year_high: number;
     year_low: number;
     sector: string;
+    industry?: string;
     name: string;
+    description?: string;
   };
   ml_score?: number;
   pattern_match?: {

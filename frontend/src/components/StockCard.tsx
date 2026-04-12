@@ -155,19 +155,23 @@ export function StockCard({ stock }: { stock: StockResult }) {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <p className="text-[11px] truncate" style={{ color: "var(--text-secondary)" }}>
-              {thesis}
+          {stock.quote?.name && stock.quote.name !== stock.ticker && (
+            <p className="text-[11px] truncate mt-0.5" style={{ color: "var(--text-primary)" }}>
+              {stock.quote.name}
             </p>
-          </div>
+          )}
+          <p className="text-[11px] mt-0.5" style={{ color: "var(--accent-bright)" }}>
+            {thesis}
+          </p>
           {stock.quote && (
-            <div className="flex items-center gap-2 mt-1 text-[10px]" style={{ color: "var(--text-muted)" }}>
+            <div className="flex items-center gap-2 mt-1 text-[10px] flex-wrap" style={{ color: "var(--text-muted)" }}>
               {stock.quote.market_cap > 0 && (
                 <span style={{ fontFamily: "var(--font-mono)" }}>
                   {formatMcap(stock.quote.market_cap)} mcap
                 </span>
               )}
-              {stock.quote.sector && <span>· {stock.quote.sector}</span>}
+              {stock.quote.industry && <span>· {stock.quote.industry}</span>}
+              {!stock.quote.industry && stock.quote.sector && <span>· {stock.quote.sector}</span>}
               {stock.quote.year_low > 0 && stock.quote.year_high > 0 && (
                 <span style={{ fontFamily: "var(--font-mono)" }}>
                   · {formatPrice(stock.quote.year_low)}–{formatPrice(stock.quote.year_high)}
@@ -211,6 +215,15 @@ export function StockCard({ stock }: { stock: StockResult }) {
           )}
         </div>
       </div>
+
+      {/* ── Company description ── */}
+      {stock.quote?.description && (
+        <div className="px-4 pb-3 -mt-1">
+          <p className="text-[11px] leading-snug" style={{ color: "var(--text-secondary)" }}>
+            {stock.quote.description}
+          </p>
+        </div>
+      )}
 
       {/* ── Score pills in a row ── */}
       <div className="flex gap-1.5 px-4 pb-3">

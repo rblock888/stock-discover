@@ -196,6 +196,10 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     try:
         if fmp.is_configured():
             q = fmp.get_quote(ticker)
+            # Try to get description too
+            desc = q.get("description", "")
+            if desc and len(desc) > 160:
+                desc = desc[:160].rsplit(" ", 1)[0] + "…"
             result["quote"] = {
                 "price": q.get("price", 0),
                 "change_pct": q.get("changesPercentage", 0),
@@ -205,7 +209,9 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 "year_high": q.get("yearHigh", 0),
                 "year_low": q.get("yearLow", 0),
                 "sector": q.get("sector", ""),
+                "industry": q.get("industry", ""),
                 "name": q.get("name", ticker),
+                "description": desc,
             }
         else:
             import yfinance as yf
@@ -213,6 +219,10 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
             price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
             prev = info.get("previousClose", price)
             change_pct = ((price - prev) / prev * 100) if prev else 0
+            # Short description
+            desc = info.get("longBusinessSummary", "") or info.get("longName", "")
+            if desc and len(desc) > 160:
+                desc = desc[:160].rsplit(" ", 1)[0] + "…"
             result["quote"] = {
                 "price": price,
                 "change_pct": change_pct,
@@ -222,7 +232,9 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 "year_high": info.get("fiftyTwoWeekHigh", 0),
                 "year_low": info.get("fiftyTwoWeekLow", 0),
                 "sector": info.get("sector", ""),
-                "name": info.get("shortName", ticker),
+                "industry": info.get("industry", ""),
+                "name": info.get("shortName", ticker) or info.get("longName", ticker),
+                "description": desc,
             }
     except Exception:
         result["quote"] = None

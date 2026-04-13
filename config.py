@@ -13,7 +13,7 @@ WEIGHTS = {
 MIN_PRICE = 0.50
 MAX_PRICE = 50.00
 MIN_AVG_VOLUME = 100_000  # 20-day average
-MIN_MARKET_CAP = 50_000_000  # $50M
+MIN_MARKET_CAP = 30_000_000  # $30M — allow true micro-caps for LWLG-style setups
 
 # --- Fundamentals thresholds ---
 REVENUE_GROWTH_STRONG = 0.20  # 20% YoY = max score

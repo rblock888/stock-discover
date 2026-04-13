@@ -49,6 +49,37 @@ function segmentStocks(stocks: StockResult[]): Segment[] {
     aiPicks.forEach((s) => used.add(s.ticker));
   }
 
+  // Asymmetric Upside — micro/small caps with strong data (the LWLG hunter)
+  const asymmetric = [...stocks]
+    .filter((s) => {
+      if (used.has(s.ticker)) return false;
+      const mcap = s.quote?.market_cap ?? 0;
+      const isSmall = mcap > 0 && mcap < 500_000_000;
+      const hasSignal =
+        (s.ml_score ?? 0) >= 50 ||
+        (s.early_detection?.score ?? 0) >= 65 ||
+        s.composite >= 55;
+      const hasFundamentals = s.breakdown.fundamentals.raw >= 50;
+      return isSmall && hasSignal && hasFundamentals;
+    })
+    .sort((a, b) => {
+      // Sort by combined: ml_score + early_detection + inverse mcap
+      const aScore = (a.ml_score ?? 0) + (a.early_detection?.score ?? 0) * 0.5;
+      const bScore = (b.ml_score ?? 0) + (b.early_detection?.score ?? 0) * 0.5;
+      return bScore - aScore;
+    })
+    .slice(0, 6);
+  if (asymmetric.length > 0) {
+    segments.push({
+      title: "Asymmetric Upside",
+      subtitle: "Sub-$500M cap with improving fundamentals — LWLG-style rerating candidates",
+      color: "#e11d48",
+      view: asymmetric.length <= 3 ? "hero" : "cards",
+      stocks: asymmetric,
+    });
+    asymmetric.forEach((s) => used.add(s.ticker));
+  }
+
   // Top 3 picks — biggest hero cards
   const topPicks = [...stocks]
     .filter((s) => !used.has(s.ticker) && (s.composite >= 55 || (s.early_detection?.score ?? 0) >= 65))

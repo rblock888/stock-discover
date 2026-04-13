@@ -92,6 +92,47 @@ def from_yahoo_small_cap_gainers(max_tickers: int = 50) -> list:
 # Source 2: Finviz screener (HTML scraping)
 # ---------------------------------------------------------------------------
 
+def from_finviz_microcap(max_tickers: int = 80) -> list:
+    """
+    Micro/small-cap hunter — stocks under $500M market cap with:
+    - Positive revenue growth (QoQ)
+    - Price under $30
+    - Avg volume > 200K (liquid enough)
+    - Off 52w lows but below midpoint
+    The LWLG-style universe.
+    """
+    tickers = []
+    try:
+        url = "https://finviz.com/screener.ashx"
+        # cap_small = $300M-2B, cap_micro = $50M-300M
+        # Combine both for our sweet spot
+        params = {
+            "v": "111",
+            "f": "cap_microover,cap_smallunder,sh_avgvol_o200,sh_price_u30,fa_salesqoq_pos,ta_sma200_pb50,ta_highlow52w_a20h",
+            "ft": "4",
+            "r": "1",
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Accept": "text/html"}
+
+        for start in range(1, max_tickers + 1, 20):
+            params["r"] = str(start)
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                break
+            matches = re.findall(r'quote\.ashx\?t=([A-Z]{1,5})', resp.text)
+            unique = []
+            for m in matches:
+                if m not in tickers and m not in unique:
+                    unique.append(m)
+            tickers.extend(unique)
+            if len(unique) < 10:
+                break
+            time.sleep(0.5)
+    except Exception:
+        pass
+    return list(dict.fromkeys(tickers))[:max_tickers]
+
+
 def from_finviz(max_tickers: int = 100) -> list:
     """
     Scrape Finviz screener for small/mid caps with:
@@ -448,6 +489,7 @@ def build_universe(
 
         if use_finviz:
             futures[pool.submit(from_finviz)] = "finviz"
+            futures[pool.submit(from_finviz_microcap)] = "finviz_microcap"
 
         if use_reddit:
             futures[pool.submit(from_reddit)] = "reddit"

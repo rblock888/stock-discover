@@ -82,7 +82,7 @@ def _run_full_pipeline():
             return
 
         # Step 2: Score top 30
-        to_score = uni["tickers"][:30]
+        to_score = uni["tickers"][:40]
         results = {}
         for i, ticker in enumerate(to_score):
             try:

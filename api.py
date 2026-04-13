@@ -39,6 +39,12 @@ import ml_breakout
 import ml_sector
 import news_sentiment
 import reddit_sentiment
+import db
+import backtest
+import alerts as alerts_module
+
+# Initialize database
+db.init_db()
 import scorer
 import universe_builder
 
@@ -121,6 +127,20 @@ def _run_full_pipeline():
         cache["improving"] = improving
         cache["last_scan"] = datetime.now().isoformat()
         cache["scan_in_progress"] = False
+
+        # ─── Persist snapshots for backtesting ───
+        try:
+            ai_picks = [s["ticker"] for s in sorted(ranked_list, key=lambda x: x.get("ml_score", 0), reverse=True)[:3]]
+            db.save_snapshot(ranked_list, scan_date=cache["last_scan"], ai_picks=ai_picks)
+        except Exception as e:
+            logger.error(f"Failed to save snapshot: {e}")
+
+        # ─── Send Telegram alerts ───
+        try:
+            ai_picks = [s["ticker"] for s in sorted(ranked_list, key=lambda x: x.get("ml_score", 0), reverse=True)[:3]]
+            alerts_module.process_scan_results(ranked_list, ai_picks)
+        except Exception as e:
+            logger.error(f"Failed to send alerts: {e}")
 
         logger.info(
             f"Pipeline done: {len(ranked_list)} scored, "
@@ -463,6 +483,126 @@ async def score_single(ticker: str):
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(pool, _score_ticker, ticker.upper())
     return _clean({"ticker": ticker.upper(), **result})
+
+
+# ────────────────────────────────────────────
+# Watchlist endpoints
+# ────────────────────────────────────────────
+
+class WatchlistAddRequest(BaseModel):
+    ticker: str
+    entry_price: float | None = None
+    target_price: float | None = None
+    stop_loss: float | None = None
+    notes: str = ""
+    shares: float = 0
+
+
+class WatchlistUpdateRequest(BaseModel):
+    entry_price: float | None = None
+    target_price: float | None = None
+    stop_loss: float | None = None
+    notes: str | None = None
+    shares: float | None = None
+
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    """Get watchlist with live prices and P&L."""
+    items = db.get_watchlist()
+    enriched = []
+    for item in items:
+        ticker = item["ticker"]
+        # Try to get current price from cache first
+        match = next((r for r in cache.get("ranked", []) if r.get("ticker") == ticker), None)
+        if match and match.get("quote"):
+            current = match["quote"].get("price", 0)
+            quote = match["quote"]
+        else:
+            # Fetch fresh
+            try:
+                if fmp.is_configured():
+                    q = fmp.get_quote(ticker)
+                    current = q.get("price", 0)
+                    quote = {"price": current, "name": q.get("name", ticker), "change_pct": q.get("changesPercentage", 0)}
+                else:
+                    import yfinance as yf
+                    info = yf.Ticker(ticker).info or {}
+                    current = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+                    quote = {"price": current, "name": info.get("shortName", ticker), "change_pct": 0}
+            except Exception:
+                current = 0
+                quote = {"price": 0, "name": ticker, "change_pct": 0}
+
+        item["current_price"] = current
+        item["quote"] = quote
+        if item.get("entry_price") and current:
+            item["pnl_pct"] = round((current - item["entry_price"]) / item["entry_price"] * 100, 2)
+            item["pnl_dollars"] = round((current - item["entry_price"]) * (item.get("shares", 0) or 0), 2)
+        else:
+            item["pnl_pct"] = 0
+            item["pnl_dollars"] = 0
+
+        # Add latest score data if available
+        if match:
+            item["composite"] = match.get("composite", 0)
+            item["ml_score"] = match.get("ml_score", 0)
+
+        enriched.append(item)
+    return _clean({"items": enriched})
+
+
+@app.post("/api/watchlist")
+async def add_watchlist(req: WatchlistAddRequest):
+    item = db.add_to_watchlist(
+        req.ticker,
+        entry_price=req.entry_price,
+        target_price=req.target_price,
+        stop_loss=req.stop_loss,
+        notes=req.notes,
+        shares=req.shares,
+    )
+    return _clean(item or {})
+
+
+@app.put("/api/watchlist/{ticker}")
+async def update_watchlist(ticker: str, req: WatchlistUpdateRequest):
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    item = db.update_watchlist_item(ticker, **fields)
+    return _clean(item or {})
+
+
+@app.delete("/api/watchlist/{ticker}")
+async def delete_watchlist(ticker: str):
+    removed = db.remove_from_watchlist(ticker)
+    return {"removed": removed}
+
+
+# ────────────────────────────────────────────
+# Backtest endpoint
+# ────────────────────────────────────────────
+
+@app.get("/api/backtest")
+async def get_backtest():
+    """Get historical performance of past picks."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(pool, backtest.compute_performance)
+    return _clean(result)
+
+
+# ────────────────────────────────────────────
+# Alerts endpoint
+# ────────────────────────────────────────────
+
+@app.get("/api/alerts/recent")
+async def get_recent_alerts():
+    return {"alerts": db.get_recent_alerts(limit=20), "telegram_configured": alerts_module.is_configured()}
+
+
+@app.post("/api/alerts/test")
+async def test_alert():
+    success = alerts_module.send_test()
+    return {"sent": success, "configured": alerts_module.is_configured()}
 
 
 if __name__ == "__main__":

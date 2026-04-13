@@ -182,6 +182,58 @@ export async function forceScan(): Promise<{ status: string }> {
   return fetcher("/api/scan", { method: "POST" });
 }
 
+// ─── Watchlist ───
+export interface WatchlistItem {
+  ticker: string;
+  added_date: string;
+  entry_price: number | null;
+  target_price: number | null;
+  stop_loss: number | null;
+  notes: string;
+  shares: number;
+  current_price: number;
+  quote: { price: number; name: string; change_pct: number };
+  pnl_pct: number;
+  pnl_dollars: number;
+  composite?: number;
+  ml_score?: number;
+}
+
+export async function getWatchlist(): Promise<{ items: WatchlistItem[] }> {
+  return fetcher("/api/watchlist");
+}
+
+export async function addToWatchlist(data: {
+  ticker: string;
+  entry_price?: number;
+  target_price?: number;
+  stop_loss?: number;
+  notes?: string;
+  shares?: number;
+}): Promise<WatchlistItem> {
+  return fetcher("/api/watchlist", { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function removeFromWatchlist(ticker: string): Promise<{ removed: boolean }> {
+  return fetcher(`/api/watchlist/${ticker}`, { method: "DELETE" });
+}
+
+// ─── Backtest ───
+export interface BacktestResult {
+  total_picks: number;
+  avg_return: number;
+  win_rate: number;
+  best_picks: { ticker: string; return_pct: number; days_held: number; entry_price: number; current_price: number }[];
+  worst_picks: { ticker: string; return_pct: number; days_held: number; entry_price: number; current_price: number }[];
+  by_segment: Record<string, { count: number; avg_return: number; win_rate: number; best?: string }>;
+  by_window: Record<string, { count: number; avg_return: number; win_rate: number }>;
+  details: string;
+}
+
+export async function getBacktest(): Promise<BacktestResult> {
+  return fetcher("/api/backtest");
+}
+
 export async function getConfig(): Promise<ConfigResponse> {
   return fetcher("/api/config");
 }

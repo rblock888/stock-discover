@@ -1,6 +1,6 @@
 "use client";
 
-import { StockResult, BucketScore } from "@/lib/api";
+import { StockResult, BucketScore, addToWatchlist } from "@/lib/api";
 import { TickerLogo } from "./TickerLogo";
 import { useState } from "react";
 
@@ -97,10 +97,28 @@ function extractReasons(bd: Record<string, BucketScore>, early?: number) {
 
 export function StockCard({ stock }: { stock: StockResult }) {
   const [expanded, setExpanded] = useState(false);
+  const [added, setAdded] = useState(false);
+  const [adding, setAdding] = useState(false);
   const early = stock.early_detection?.score ?? 0;
   const comp = stock.competitors;
   const { pros, cons } = extractReasons(stock.breakdown, early);
   const thesis = buildThesis(stock);
+
+  async function handleAdd(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (added || adding) return;
+    setAdding(true);
+    try {
+      await addToWatchlist({
+        ticker: stock.ticker,
+        entry_price: stock.quote?.price,
+      });
+      setAdded(true);
+    } catch {
+      // ignore
+    }
+    setAdding(false);
+  }
 
   return (
     <div
@@ -213,6 +231,19 @@ export function StockCard({ stock }: { stock: StockResult }) {
               </div>
             </div>
           )}
+          <button
+            onClick={handleAdd}
+            disabled={added || adding}
+            className="self-center w-7 h-7 rounded flex items-center justify-center text-[14px] transition-colors"
+            style={{
+              backgroundColor: added ? "var(--green-dim)" : "var(--bg-elevated)",
+              color: added ? "var(--green)" : "var(--text-secondary)",
+              border: "1px solid var(--border)",
+            }}
+            title={added ? "Added to watchlist" : "Add to watchlist"}
+          >
+            {added ? "✓" : adding ? "…" : "+"}
+          </button>
         </div>
       </div>
 

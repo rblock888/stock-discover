@@ -10,7 +10,8 @@ import {
 import { StockTable } from "@/components/StockTable";
 import { StockCard } from "@/components/StockCard";
 import { SourceBadges } from "@/components/SourceBadges";
-import { TickerLogo } from "@/components/TickerLogo";
+import { WatchlistPanel } from "@/components/WatchlistPanel";
+import { BacktestPanel } from "@/components/BacktestPanel";
 
 type Segment = {
   title: string;
@@ -244,6 +245,12 @@ export default function Home() {
 
       {/* ── Content ── */}
       <main className="max-w-[1400px] mx-auto px-5 py-6 space-y-8">
+        {/* Watchlist + Backtest top row */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <WatchlistPanel />
+          <BacktestPanel />
+        </section>
+
         {segments.map((segment) => (
           <section key={segment.title}>
             <div className="flex items-baseline gap-3 mb-4">

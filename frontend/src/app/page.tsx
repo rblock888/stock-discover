@@ -12,6 +12,7 @@ import { StockCard } from "@/components/StockCard";
 import { SourceBadges } from "@/components/SourceBadges";
 import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { BacktestPanel } from "@/components/BacktestPanel";
+import { ManualLookup } from "@/components/ManualLookup";
 
 type Segment = {
   title: string;
@@ -280,6 +281,11 @@ export default function Home() {
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <WatchlistPanel />
           <BacktestPanel />
+        </section>
+
+        {/* Manual lookup */}
+        <section>
+          <ManualLookup />
         </section>
 
         {segments.map((segment) => (

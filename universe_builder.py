@@ -257,19 +257,49 @@ def _from_reddit_no_auth(max_tickers: int = 50) -> list:
 # Source 4: SEC EDGAR — recent insider purchases
 # ---------------------------------------------------------------------------
 
-def from_sec_insider_buys(max_tickers: int = 50) -> list:
-    """Find tickers with recent Form 4 insider purchases from EDGAR full-text search."""
-    tickers = set()
+_CIK_TICKER_MAP = None
+
+
+def _load_cik_to_ticker_map() -> dict:
+    """Load SEC CIK→ticker mapping, cached in module."""
+    global _CIK_TICKER_MAP
+    if _CIK_TICKER_MAP is not None:
+        return _CIK_TICKER_MAP
     try:
         headers = {"User-Agent": config.SEC_USER_AGENT}
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=headers, timeout=15
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # Build CIK → ticker (pad CIK to 10 digits)
+            _CIK_TICKER_MAP = {
+                str(v["cik_str"]).zfill(10): v["ticker"]
+                for v in data.values()
+            }
+            return _CIK_TICKER_MAP
+    except Exception:
+        pass
+    _CIK_TICKER_MAP = {}
+    return _CIK_TICKER_MAP
 
-        # Search for recent Form 4 filings mentioning "purchase"
+
+def from_sec_insider_buys(max_tickers: int = 50) -> list:
+    """Find tickers with recent Form 4 insider filings from EDGAR."""
+    cik_map = _load_cik_to_ticker_map()
+    if not cik_map:
+        return []
+
+    tickers = []
+    ticker_counts = {}
+    try:
+        headers = {"User-Agent": config.SEC_USER_AGENT}
         url = "https://efts.sec.gov/LATEST/search-index"
         params = {
-            "q": '"Purchase" OR "Bought"',
             "forms": "4",
             "dateRange": "custom",
-            "startdt": (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d"),
+            "startdt": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
             "enddt": datetime.now().strftime("%Y-%m-%d"),
         }
 
@@ -277,36 +307,20 @@ def from_sec_insider_buys(max_tickers: int = 50) -> list:
         if resp.status_code == 200:
             data = resp.json()
             hits = data.get("hits", {}).get("hits", [])
-            for hit in hits[:200]:
-                source = hit.get("_source", {})
-                ticker_list = source.get("tickers", [])
-                for t in ticker_list:
-                    if t and 1 < len(t) <= 5 and t.isalpha():
-                        tickers.add(t.upper())
+            for hit in hits[:300]:
+                src = hit.get("_source", {})
+                for cik in src.get("ciks", []):
+                    cik_padded = str(cik).zfill(10)
+                    ticker = cik_map.get(cik_padded)
+                    if ticker and len(ticker) <= 5 and ticker.isalpha():
+                        ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
     except Exception:
         pass
 
-    # Fallback: use EDGAR XBRL company search for recent filings
-    if not tickers:
-        try:
-            url = "https://efts.sec.gov/LATEST/search-index"
-            params = {
-                "forms": "4",
-                "dateRange": "custom",
-                "startdt": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
-                "enddt": datetime.now().strftime("%Y-%m-%d"),
-            }
-            headers = {"User-Agent": config.SEC_USER_AGENT}
-            resp = requests.get(url, params=params, headers=headers, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                for hit in data.get("hits", {}).get("hits", [])[:100]:
-                    source = hit.get("_source", {})
-                    for t in source.get("tickers", []):
-                        if t and 1 < len(t) <= 5 and t.isalpha():
-                            tickers.add(t.upper())
-        except Exception:
-            pass
+    # Return tickers with 2+ filings (higher signal = more insider activity)
+    sorted_t = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)
+    tickers = [t for t, count in sorted_t if count >= 1]
+    return tickers[:max_tickers]
 
     return list(tickers)[:max_tickers]
 

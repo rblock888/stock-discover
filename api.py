@@ -554,9 +554,27 @@ async def get_watchlist():
 
 @app.post("/api/watchlist")
 async def add_watchlist(req: WatchlistAddRequest):
+    entry_price = req.entry_price
+    # Auto-fill entry price with current market price if not provided
+    if entry_price is None or entry_price <= 0:
+        ticker = req.ticker.upper()
+        match = next((r for r in cache.get("ranked", []) if r.get("ticker") == ticker), None)
+        if match and match.get("quote"):
+            entry_price = match["quote"].get("price")
+        if not entry_price:
+            try:
+                if fmp.is_configured():
+                    entry_price = fmp.get_quote(ticker).get("price")
+                else:
+                    import yfinance as yf
+                    info = yf.Ticker(ticker).info or {}
+                    entry_price = info.get("currentPrice") or info.get("regularMarketPrice")
+            except Exception:
+                entry_price = None
+
     item = db.add_to_watchlist(
         req.ticker,
-        entry_price=req.entry_price,
+        entry_price=entry_price,
         target_price=req.target_price,
         stop_loss=req.stop_loss,
         notes=req.notes,

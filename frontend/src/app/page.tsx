@@ -134,74 +134,6 @@ function buildSegments(stocks: StockResult[]): Segment[] {
   return segs;
 }
 
-// ─── Segment block ────────────────────────────────────────────────────────────
-
-function SegmentBlock({
-  seg,
-  cols = 2,
-  maxCards = 4,
-}: {
-  seg: Segment;
-  cols?: 1 | 2 | 3;
-  maxCards?: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const visible = expanded ? seg.stocks : seg.stocks.slice(0, maxCards);
-  const hasMore = seg.stocks.length > maxCards;
-
-  const gridCols =
-    cols === 3
-      ? "grid-cols-1 lg:grid-cols-3"
-      : cols === 2
-        ? "grid-cols-1 lg:grid-cols-2"
-        : "grid-cols-1";
-
-  return (
-    <div>
-      <div className="flex items-baseline gap-2 mb-3">
-        <span
-          className="w-[3px] h-[18px] rounded-full shrink-0"
-          style={{ backgroundColor: seg.color }}
-        />
-        <span
-          className="text-[14px] font-semibold"
-          style={{ letterSpacing: "-0.02em" }}
-        >
-          {seg.title}
-        </span>
-        <span
-          className="text-[11px] tabular-nums"
-          style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
-        >
-          {seg.stocks.length}
-        </span>
-        <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-          {seg.subtitle}
-        </span>
-      </div>
-      <div className={`grid ${gridCols} gap-3`}>
-        {visible.map((s) => (
-          <StockCard key={s.ticker} stock={s} />
-        ))}
-      </div>
-      {hasMore && (
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="mt-2 text-[11px] px-3 py-1 rounded transition-colors"
-          style={{
-            color: "var(--text-muted)",
-            border: "1px solid var(--border)",
-          }}
-        >
-          {expanded
-            ? "Show less"
-            : `Show ${seg.stocks.length - maxCards} more`}
-        </button>
-      )}
-    </div>
-  );
-}
-
 // ─── Tab views ────────────────────────────────────────────────────────────────
 
 function PicksView({
@@ -211,80 +143,97 @@ function PicksView({
   segments: Segment[];
   ranked: StockResult[];
 }) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const selectedStock = selected
-    ? ranked.find((r) => r.ticker === selected) ?? null
-    : null;
-
-  // Group segments into layout rows
-  const squeeze = segments.find((s) => s.id === "squeeze");
-  const asymmetric = segments.find((s) => s.id === "asymmetric");
-  const ai = segments.find((s) => s.id === "ai");
-  const rest = segments.filter(
-    (s) => !["squeeze", "asymmetric", "ai"].includes(s.id),
-  );
-  // Everything else (early, lagging, momentum, fundamentals) shown as pairs
-  const pairs: [Segment, Segment | undefined][] = [];
-  for (let i = 0; i < rest.length; i += 2) {
-    pairs.push([rest[i], rest[i + 1]]);
-  }
-
-  // Tail — stocks with composite >= 40 not already shown
   const shownTickers = new Set(segments.flatMap((s) => s.stocks.map((x) => x.ticker)));
-  const tailStocks = ranked.filter(
-    (s) => !shownTickers.has(s.ticker) && s.composite >= 40,
-  );
+  const tailStocks = ranked.filter((s) => !shownTickers.has(s.ticker) && s.composite >= 40);
+
+  const tabs = [
+    ...segments.map((s) => ({ id: s.id, label: s.title, count: s.stocks.length, color: s.color })),
+    ...(tailStocks.length > 0 ? [{ id: "watch", label: "On Watch", count: tailStocks.length, color: "var(--text-muted)" }] : []),
+  ];
+
+  const [activeTab, setActiveTab] = useState(tabs[0]?.id ?? "");
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+
+  // Reset card selection when tab changes
+  const handleTab = (id: string) => { setActiveTab(id); setSelectedTicker(null); };
+
+  const activeSeg = segments.find((s) => s.id === activeTab);
+  const selectedStock = selectedTicker ? ranked.find((r) => r.ticker === selectedTicker) ?? null : null;
+
+  const cols = activeSeg?.stocks.length === 1 ? 1 : activeSeg?.id === "ai" ? 3 : 2;
 
   return (
-    <div className="p-5 space-y-8 max-w-[1200px]">
-      {/* Row 1: Squeeze (left) + Asymmetric (right) */}
-      {(squeeze || asymmetric) && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {squeeze && <SegmentBlock seg={squeeze} cols={1} maxCards={2} />}
-          {asymmetric && <SegmentBlock seg={asymmetric} cols={1} maxCards={2} />}
-        </div>
-      )}
-
-      {/* Row 2: AI Picks full width — 3 col */}
-      {ai && <SegmentBlock seg={ai} cols={3} maxCards={3} />}
-
-      {/* Row 3+: Rest in pairs side by side */}
-      {pairs.map(([left, right], i) => (
-        <div key={i} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <SegmentBlock seg={left} cols={1} maxCards={2} />
-          {right && <SegmentBlock seg={right} cols={1} maxCards={2} />}
-        </div>
-      ))}
-
-      {/* Tail table */}
-      {tailStocks.length > 0 && (
-        <div>
-          <div className="flex items-baseline gap-2 mb-3">
-            <span
-              className="w-[3px] h-[18px] rounded-full shrink-0"
-              style={{ backgroundColor: "var(--text-muted)" }}
-            />
-            <span
-              className="text-[14px] font-semibold"
-              style={{ letterSpacing: "-0.02em" }}
+    <div className="flex flex-col h-full">
+      {/* Tab bar — sticky at top of content pane */}
+      <div
+        className="flex items-center gap-1 px-4 overflow-x-auto shrink-0"
+        style={{
+          height: 44,
+          borderBottom: "1px solid var(--border)",
+          backgroundColor: "var(--bg-primary)",
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+        }}
+      >
+        {tabs.map((t) => {
+          const active = t.id === activeTab;
+          return (
+            <button
+              key={t.id}
+              onClick={() => handleTab(t.id)}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-md shrink-0 transition-colors text-[12px] font-medium"
+              style={{
+                backgroundColor: active ? t.color + "18" : "transparent",
+                color: active ? t.color : "var(--text-muted)",
+                border: active ? `1px solid ${t.color}30` : "1px solid transparent",
+              }}
             >
-              On Watch
-            </span>
-            <span
-              className="text-[11px]"
-              style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
-            >
-              {tailStocks.length}
-            </span>
-          </div>
-          <StockTable stocks={tailStocks} onSelect={setSelected} />
-          {selectedStock && (
-            <div className="mt-3">
-              <StockCard stock={selectedStock} />
+              {t.label}
+              <span
+                className="text-[10px] tabular-nums"
+                style={{
+                  color: active ? t.color : "var(--text-muted)",
+                  fontFamily: "var(--font-mono)",
+                  opacity: active ? 1 : 0.7,
+                }}
+              >
+                {t.count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Content */}
+      <div className="p-5 max-w-[1200px]">
+        {activeSeg && (
+          <>
+            <div className="text-[11px] mb-4" style={{ color: "var(--text-muted)" }}>
+              {activeSeg.subtitle}
             </div>
-          )}
-        </div>
-      )}
+            <div className={`grid gap-3 ${cols === 3 ? "grid-cols-1 lg:grid-cols-3" : cols === 2 ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+              {activeSeg.stocks.map((s) => (
+                <StockCard key={s.ticker} stock={s} />
+              ))}
+            </div>
+          </>
+        )}
+
+        {activeTab === "watch" && (
+          <>
+            <div className="text-[11px] mb-4" style={{ color: "var(--text-muted)" }}>
+              Composite ≥ 40 · not in any named segment
+            </div>
+            <StockTable stocks={tailStocks} onSelect={setSelectedTicker} />
+            {selectedStock && (
+              <div className="mt-3">
+                <StockCard stock={selectedStock} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

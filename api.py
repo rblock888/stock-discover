@@ -42,6 +42,9 @@ import reddit_sentiment
 import db
 import backtest
 import alerts as alerts_module
+import axt_filter
+import photonics_cycle
+import short_squeeze
 
 # Initialize database
 db.init_db()
@@ -63,6 +66,18 @@ cache = {
     "scan_in_progress": False,
     "new_since_last": [],  # tickers that appeared since last scan
     "history": [],  # track score changes over time
+}
+
+axt_cache = {
+    "results": [],
+    "last_scan": None,
+    "scan_in_progress": False,
+}
+
+photonics_cache = {
+    "phases": [],
+    "last_scan": None,
+    "scan_in_progress": False,
 }
 
 
@@ -153,11 +168,47 @@ def _run_full_pipeline():
         cache["scan_in_progress"] = False
 
 
+def _run_photonics_pipeline():
+    """Score all phase seed universes through the photonics cycle model."""
+    photonics_cache["scan_in_progress"] = True
+    try:
+        phases = photonics_cycle.scan_all_phases()
+        photonics_cache["phases"] = phases
+        photonics_cache["last_scan"] = datetime.now().isoformat()
+        total_candidates = sum(len(p["candidates"]) for p in phases)
+        logger.info(f"Photonics cycle scan done: {total_candidates} candidates across 5 phases")
+    except Exception as e:
+        logger.error(f"Photonics cycle scan failed: {e}")
+    finally:
+        photonics_cache["scan_in_progress"] = False
+
+
+def _run_axt_pipeline(tickers: list[str] | None = None):
+    """Score tickers through the AXT filter. Defaults to the seed universe."""
+    axt_cache["scan_in_progress"] = True
+    to_scan = tickers or axt_filter.AXT_SEED_UNIVERSE
+    results = []
+    for ticker in to_scan:
+        try:
+            r = axt_filter.score(ticker)
+            results.append(r)
+            logger.info(f"  AXT {ticker}: rerate={r['rerate_score']}, layer={r['stack_layer']}")
+        except Exception as e:
+            logger.error(f"  AXT failed {ticker}: {e}")
+    results.sort(key=lambda x: x["rerate_score"], reverse=True)
+    axt_cache["results"] = results
+    axt_cache["last_scan"] = datetime.now().isoformat()
+    axt_cache["scan_in_progress"] = False
+    logger.info(f"AXT scan done: {len(results)} tickers, {sum(1 for r in results if r['is_candidate'])} candidates")
+
+
 async def _background_scanner():
     """Background task that runs the pipeline periodically."""
-    # Run immediately on startup
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(pool, _run_full_pipeline)
+    # Run AXT + photonics cycle scans after main pipeline
+    asyncio.create_task(loop.run_in_executor(pool, _run_axt_pipeline, None))
+    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
 
     # Then every SCAN_INTERVAL
     while True:
@@ -304,6 +355,10 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         sector["score"] * 0.20
     )
     result["ml_score"] = round(ml_score, 1)
+
+    # Short squeeze potential
+    squeeze = short_squeeze.score(ticker, bucket_scores)
+    result["short_squeeze"] = squeeze
 
     return result
 
@@ -621,6 +676,87 @@ async def get_recent_alerts():
 async def test_alert():
     success = alerts_module.send_test()
     return {"sent": success, "configured": alerts_module.is_configured()}
+
+
+# ────────────────────────────────────────────
+# AXT Microcap Filter endpoints
+# ────────────────────────────────────────────
+
+class AxtScanRequest(BaseModel):
+    tickers: list[str] | None = None  # None = use seed universe
+
+
+@app.get("/api/axt-scan")
+async def get_axt_scan():
+    """Return cached AXT filter results over the seed universe."""
+    return _clean({
+        "results": axt_cache["results"],
+        "last_scan": axt_cache["last_scan"],
+        "scan_in_progress": axt_cache["scan_in_progress"],
+        "candidates": [r for r in axt_cache["results"] if r.get("is_candidate")],
+        "seed_universe": axt_filter.AXT_SEED_UNIVERSE,
+    })
+
+
+@app.post("/api/axt-scan")
+async def run_axt_scan(req: AxtScanRequest):
+    """Trigger an AXT scan. Optionally pass custom ticker list."""
+    if axt_cache["scan_in_progress"]:
+        return {"status": "already_running"}
+    loop = asyncio.get_event_loop()
+    asyncio.create_task(
+        loop.run_in_executor(pool, _run_axt_pipeline, req.tickers)
+    )
+    return {"status": "started"}
+
+
+@app.get("/api/axt-scan/{ticker}")
+async def axt_score_single(ticker: str):
+    """Score a single ticker through the AXT filter."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(pool, axt_filter.score, ticker.upper())
+    return _clean(result)
+
+
+# ────────────────────────────────────────────
+# Photonics Cycle endpoints
+# ────────────────────────────────────────────
+
+@app.get("/api/photonics-cycle")
+async def get_photonics_cycle():
+    """Return cached photonics cycle data — all 5 phases with ranked tickers."""
+    return _clean({
+        "current_phase_num": photonics_cycle.CURRENT_PHASE_NUM,
+        "phases": photonics_cache["phases"],
+        "last_scan": photonics_cache["last_scan"],
+        "scan_in_progress": photonics_cache["scan_in_progress"],
+    })
+
+
+@app.post("/api/photonics-cycle/rescan")
+async def rescan_photonics_cycle():
+    """Trigger a fresh photonics cycle scan."""
+    if photonics_cache["scan_in_progress"]:
+        return {"status": "already_running"}
+    loop = asyncio.get_event_loop()
+    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
+    return {"status": "started"}
+
+
+@app.get("/api/photonics-cycle/{ticker}")
+async def photonics_score_single(ticker: str):
+    """Score a single ticker against all 5 phases."""
+    t = ticker.upper()
+    loop = asyncio.get_event_loop()
+    results = {}
+    for phase in photonics_cycle.PHASES:
+        r = await loop.run_in_executor(pool, photonics_cycle.score_for_phase, t, phase)
+        results[phase["id"]] = r
+    return _clean({
+        "ticker": t,
+        "phases": results,
+        "best_phase": max(results.items(), key=lambda x: x[1]["phase_score"])[0],
+    })
 
 
 if __name__ == "__main__":

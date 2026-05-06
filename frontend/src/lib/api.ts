@@ -21,6 +21,17 @@ export interface BucketScore {
   components: ScoreComponents;
 }
 
+export interface ShortSqueezeResult {
+  score: number;
+  level: "extreme" | "high" | "moderate" | "low";
+  short_pct_float: number;
+  days_to_cover: number;
+  float_shares: number;
+  shares_short: number;
+  components: ScoreComponents;
+  details: string;
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
@@ -52,6 +63,7 @@ export interface StockResult {
     description?: string;
   };
   ml_score?: number;
+  short_squeeze?: ShortSqueezeResult;
   pattern_match?: {
     score: number;
     best_match: string | null;
@@ -245,4 +257,119 @@ export async function updateConfig(
     method: "PUT",
     body: JSON.stringify(config),
   });
+}
+
+// ─── AXT Microcap Filter ───
+
+export interface AxtFilter {
+  score: number;
+  label: string;
+  pass: boolean;
+  hits?: string[];
+}
+
+export interface AxtResult {
+  ticker: string;
+  name: string;
+  rerate_score: number;
+  stack_layer: string;
+  filters: {
+    stack_position: AxtFilter;
+    market_cap: AxtFilter;
+    revenue_profile: AxtFilter;
+    supply_chain: AxtFilter;
+    capacity_signal: AxtFilter;
+  };
+  filters_passed: number;
+  is_candidate: boolean;
+  narrative_penalty: number;
+  narrative_hits: string[];
+  supply_hits: string[];
+  capacity_hits: string[];
+  market_cap: number;
+  sector: string;
+  industry: string;
+  price: number;
+}
+
+export interface AxtScanResponse {
+  results: AxtResult[];
+  candidates: AxtResult[];
+  last_scan: string | null;
+  scan_in_progress: boolean;
+  seed_universe: string[];
+}
+
+export async function getAxtScan(): Promise<AxtScanResponse> {
+  return fetcher("/api/axt-scan");
+}
+
+export async function runAxtScan(tickers?: string[]): Promise<{ status: string }> {
+  return fetcher("/api/axt-scan", {
+    method: "POST",
+    body: JSON.stringify({ tickers: tickers ?? null }),
+  });
+}
+
+export async function axtScoreSingle(ticker: string): Promise<AxtResult> {
+  return fetcher(`/api/axt-scan/${ticker}`);
+}
+
+// ─── Photonics Cycle ───
+
+export interface PhaseFilter {
+  score: number;
+  pass: boolean;
+  label: string;
+}
+
+export interface PhaseResult {
+  ticker: string;
+  name: string;
+  phase_score: number;
+  filters: {
+    stack: PhaseFilter;
+    mcap: PhaseFilter;
+    revenue: PhaseFilter;
+    supply: PhaseFilter;
+    capacity: PhaseFilter;
+  };
+  filters_passed: number;
+  is_candidate: boolean;
+  supply_hits: string[];
+  capacity_hits: string[];
+  narrative_penalty: number;
+  market_cap: number;
+  sector: string;
+  industry: string;
+  price: number;
+}
+
+export interface CyclePhase {
+  id: string;
+  num: number;
+  name: string;
+  layer: string;
+  timeline: string;
+  status: "in_progress" | "emerging" | "current" | "upcoming" | "future";
+  asymmetry: "medium" | "high" | "very_high";
+  color: string;
+  description: string;
+  results: PhaseResult[];
+  candidates: PhaseResult[];
+}
+
+export interface PhotonicsCycleResponse {
+  current_phase_num: number;
+  phases: CyclePhase[];
+  last_scan: string | null;
+  scan_in_progress: boolean;
+}
+
+export async function getPhotonicsCycle(): Promise<PhotonicsCycleResponse> {
+  return fetcher("/api/photonics-cycle");
+}
+
+export async function rescanPhotonicsCycle(): Promise<{ status: string }> {
+  return fetcher("/api/photonics-cycle/rescan", { method: "POST" });
 }

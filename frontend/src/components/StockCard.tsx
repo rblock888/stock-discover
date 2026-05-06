@@ -1,6 +1,6 @@
 "use client";
 
-import { StockResult, BucketScore, addToWatchlist } from "@/lib/api";
+import { StockResult, BucketScore, ShortSqueezeResult, addToWatchlist } from "@/lib/api";
 import { TickerLogo } from "./TickerLogo";
 import { useState } from "react";
 
@@ -170,6 +170,15 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 style={{ backgroundColor: "var(--green-dim)", color: "var(--green)" }}
               >
                 Early
+              </span>
+            )}
+            {stock.short_squeeze && stock.short_squeeze.score >= 60 && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "#ec489920", color: "#ec4899" }}
+                title={`Short squeeze score ${stock.short_squeeze.score} — ${stock.short_squeeze.short_pct_float}% float shorted, ${stock.short_squeeze.days_to_cover}d to cover`}
+              >
+                {stock.short_squeeze.level === "extreme" ? "Squeeze⚡" : "Squeeze"}
               </span>
             )}
           </div>
@@ -403,6 +412,66 @@ export function StockCard({ stock }: { stock: StockResult }) {
                   }}
                 >
                   {f}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Short Squeeze ── */}
+      {stock.short_squeeze && stock.short_squeeze.score >= 45 && (
+        <div className="px-4 py-3 space-y-1.5" style={{ borderTop: "1px solid var(--border)" }}>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "#ec4899" }}>
+              Short Squeeze
+            </span>
+            <span
+              className="text-[11px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+              style={{
+                color: stock.short_squeeze.score >= 75 ? "#ec4899" : stock.short_squeeze.score >= 60 ? "#f9a8d4" : "var(--text-muted)",
+                backgroundColor: "#ec489915",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {stock.short_squeeze.score.toFixed(0)}
+            </span>
+            <span className="text-[10px] font-semibold uppercase tracking-[0.05em]" style={{ color: "#ec489980" }}>
+              {stock.short_squeeze.level}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-3 text-[11px]">
+            {stock.short_squeeze.short_pct_float > 0 && (
+              <span>
+                <span style={{ color: "var(--text-muted)" }}>Float short: </span>
+                <span className="font-bold tabular-nums" style={{ color: "#ec4899", fontFamily: "var(--font-mono)" }}>
+                  {stock.short_squeeze.short_pct_float}%
+                </span>
+              </span>
+            )}
+            {stock.short_squeeze.days_to_cover > 0 && (
+              <span>
+                <span style={{ color: "var(--text-muted)" }}>DTC: </span>
+                <span className="font-bold tabular-nums" style={{ color: "#ec4899", fontFamily: "var(--font-mono)" }}>
+                  {stock.short_squeeze.days_to_cover}d
+                </span>
+              </span>
+            )}
+            {stock.short_squeeze.float_shares > 0 && (
+              <span style={{ color: "var(--text-muted)" }}>
+                {(stock.short_squeeze.float_shares / 1e6).toFixed(1)}M float
+              </span>
+            )}
+          </div>
+          {Object.keys(stock.short_squeeze.components).length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {Object.entries(stock.short_squeeze.components).map(([k, v]) => (
+                <span
+                  key={k}
+                  className="text-[9px] px-1.5 py-[2px] rounded"
+                  style={{ backgroundColor: "#ec489912", color: "#f9a8d4", border: "1px solid #ec489930" }}
+                >
+                  {String(v)}
                 </span>
               ))}
             </div>

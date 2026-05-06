@@ -21,11 +21,12 @@ import fmp
 logger = logging.getLogger("short_squeeze")
 
 
-def score(ticker: str, bucket_scores: dict = None) -> dict:
+def score(ticker: str, bucket_scores: dict = None, yf_info: dict = None) -> dict:
     """
     Score short squeeze potential (0-100).
 
     bucket_scores: optional pre-computed insider/catalyst scores from the main pipeline.
+    yf_info: optional pre-fetched yfinance info dict (avoids a second network call).
     """
     components = {}
     score_parts = []
@@ -54,10 +55,10 @@ def score(ticker: str, bucket_scores: dict = None) -> dict:
             dtc = shares_short / avg_vol
 
     if not short_pct:
-        # yfinance fallback
+        # yfinance fallback — accept pre-fetched info to avoid double network call
         try:
             import yfinance as yf
-            info = yf.Ticker(ticker).info or {}
+            info = yf_info if yf_info is not None else (yf.Ticker(ticker).info or {})
             raw_pct = info.get("shortPercentOfFloat") or 0
             short_pct = raw_pct / 100 if raw_pct > 1 else raw_pct
             dtc = info.get("shortRatio") or 0

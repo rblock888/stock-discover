@@ -45,6 +45,7 @@ import alerts as alerts_module
 import axt_filter
 import photonics_cycle
 import short_squeeze
+import squeeze_discovery
 
 # Initialize database
 db.init_db()
@@ -76,6 +77,12 @@ axt_cache = {
 
 photonics_cache = {
     "phases": [],
+    "last_scan": None,
+    "scan_in_progress": False,
+}
+
+squeeze_cache = {
+    "results": [],
     "last_scan": None,
     "scan_in_progress": False,
 }
@@ -183,6 +190,21 @@ def _run_photonics_pipeline():
         photonics_cache["scan_in_progress"] = False
 
 
+def _run_squeeze_pipeline():
+    """Proactively discover squeeze candidates via Finviz short-interest screens."""
+    squeeze_cache["scan_in_progress"] = True
+    try:
+        results = squeeze_discovery.scan(max_candidates=80, min_score=35)
+        squeeze_cache["results"] = results
+        squeeze_cache["last_scan"] = datetime.now().isoformat()
+        candidates = sum(1 for r in results if r["score"] >= 60)
+        logger.info(f"Squeeze discovery done: {len(results)} setups, {candidates} high/extreme")
+    except Exception as e:
+        logger.error(f"Squeeze discovery failed: {e}")
+    finally:
+        squeeze_cache["scan_in_progress"] = False
+
+
 def _run_axt_pipeline(tickers: list[str] | None = None):
     """Score tickers through the AXT filter. Defaults to the seed universe."""
     axt_cache["scan_in_progress"] = True
@@ -206,9 +228,10 @@ async def _background_scanner():
     """Background task that runs the pipeline periodically."""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(pool, _run_full_pipeline)
-    # Run AXT + photonics cycle scans after main pipeline
+    # Run AXT + photonics + squeeze discovery scans after main pipeline
     asyncio.create_task(loop.run_in_executor(pool, _run_axt_pipeline, None))
     asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
+    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
 
     # Then every SCAN_INTERVAL
     while True:
@@ -757,6 +780,31 @@ async def photonics_score_single(ticker: str):
         "phases": results,
         "best_phase": max(results.items(), key=lambda x: x[1]["phase_score"])[0],
     })
+
+
+# ────────────────────────────────────────────
+# Squeeze Discovery endpoints
+# ────────────────────────────────────────────
+
+@app.get("/api/squeeze-scan")
+async def get_squeeze_scan():
+    """Return cached squeeze discovery results."""
+    return _clean({
+        "results": squeeze_cache["results"],
+        "candidates": [r for r in squeeze_cache["results"] if r["score"] >= 60],
+        "last_scan": squeeze_cache["last_scan"],
+        "scan_in_progress": squeeze_cache["scan_in_progress"],
+    })
+
+
+@app.post("/api/squeeze-scan/rescan")
+async def rescan_squeeze():
+    """Trigger a fresh squeeze discovery scan."""
+    if squeeze_cache["scan_in_progress"]:
+        return {"status": "already_running"}
+    loop = asyncio.get_event_loop()
+    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
+    return {"status": "started"}
 
 
 if __name__ == "__main__":

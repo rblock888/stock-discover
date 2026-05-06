@@ -373,3 +373,37 @@ export async function getPhotonicsCycle(): Promise<PhotonicsCycleResponse> {
 export async function rescanPhotonicsCycle(): Promise<{ status: string }> {
   return fetcher("/api/photonics-cycle/rescan", { method: "POST" });
 }
+
+// ─── Squeeze Discovery ───
+
+export interface SqueezeCandidate {
+  ticker: string;
+  name: string;
+  price: number;
+  change_pct: number;
+  sector: string;
+  market_cap: number;
+  score: number;
+  level: "extreme" | "high" | "moderate" | "low";
+  short_pct_float: number;
+  days_to_cover: number;
+  float_shares: number;
+  shares_short: number;
+  components: Record<string, string>;
+  details: string;
+}
+
+export interface SqueezeScanResponse {
+  results: SqueezeCandidate[];
+  candidates: SqueezeCandidate[];
+  last_scan: string | null;
+  scan_in_progress: boolean;
+}
+
+export async function getSqueezeScan(): Promise<SqueezeScanResponse> {
+  return fetcher("/api/squeeze-scan");
+}
+
+export async function rescanSqueeze(): Promise<{ status: string }> {
+  return fetcher("/api/squeeze-scan/rescan", { method: "POST" });
+}

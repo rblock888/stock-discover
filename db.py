@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 from contextlib import contextmanager
 
-DB_PATH = os.environ.get("DB_PATH", "/opt/stock-discover/data.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__) or ".", "data.db"))
 
 
 def init_db():

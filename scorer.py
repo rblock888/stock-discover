@@ -1,5 +1,7 @@
 """Composite scorer: combines all bucket scores into a final ranking."""
 
+import math
+
 import config
 
 
@@ -17,6 +19,10 @@ def composite_score(bucket_scores: dict) -> dict:
     for bucket, weight in config.WEIGHTS.items():
         bucket_data = bucket_scores.get(bucket, {"score": 0, "details": "N/A"})
         raw = bucket_data["score"]
+        # yfinance gaps can yield NaN scores — a NaN here poisons the composite
+        # and breaks JSON serialization downstream
+        if not isinstance(raw, (int, float)) or not math.isfinite(raw):
+            raw = 0
         weighted = raw * weight
         weighted_total += weighted
         breakdown[bucket] = {

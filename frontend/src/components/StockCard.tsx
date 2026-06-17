@@ -1,8 +1,9 @@
 "use client";
 
-import { StockResult, BucketScore, ShortSqueezeResult, addToWatchlist } from "@/lib/api";
+import { StockResult, BucketScore, EdgeGauge, HistoryResponse, addToWatchlist, getHistory } from "@/lib/api";
 import { TickerLogo } from "./TickerLogo";
-import { useState } from "react";
+import { Sparkline } from "./gauges";
+import { useEffect, useState } from "react";
 
 const BUCKETS = [
   { key: "fundamentals", label: "Fundamentals" },
@@ -17,6 +18,45 @@ function scoreColor(s: number) {
   if (s >= 60) return "var(--green-bright)";
   if (s >= 40) return "var(--amber)";
   return "var(--red)";
+}
+
+function edgeColor(state: string): string {
+  switch (state) {
+    case "HEALTHY":
+    case "CLEAN UP":
+    case "TRADABLE":
+      return "var(--green)";
+    case "CROWDED":
+    case "CHOPPY UP":
+      return "var(--amber)";
+    case "WILD":
+    case "CHOPPY DOWN":
+    case "DOWN":
+      return "var(--red)";
+    case "QUIET":
+      return "var(--accent-bright)";
+    default: // THIN, FLAT, UNKNOWN
+      return "var(--text-muted)";
+  }
+}
+
+function EdgePill({ name, gauge }: { name: string; gauge?: EdgeGauge }) {
+  if (!gauge) return null;
+  const color = edgeColor(gauge.state);
+  return (
+    <div
+      className="flex-1 rounded px-2 py-1.5 cursor-help"
+      style={{ backgroundColor: "var(--bg-primary)", border: `1px solid ${color}30` }}
+      title={`${gauge.summary}\n${gauge.advice.map((a) => `• ${a}`).join("\n")}`}
+    >
+      <div className="text-[8px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
+        {name}
+      </div>
+      <div className="text-[10px] font-bold mt-0.5 truncate" style={{ color }}>
+        {gauge.state}
+      </div>
+    </div>
+  );
 }
 
 function formatMcap(n: number): string {
@@ -99,10 +139,20 @@ export function StockCard({ stock }: { stock: StockResult }) {
   const [expanded, setExpanded] = useState(false);
   const [added, setAdded] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [history, setHistory] = useState<HistoryResponse | null>(null);
   const early = stock.early_detection?.score ?? 0;
   const comp = stock.competitors;
   const { pros, cons } = extractReasons(stock.breakdown, early);
   const thesis = buildThesis(stock);
+
+  // Lazy-load score history the first time the card is expanded
+  useEffect(() => {
+    if (expanded && history === null) {
+      getHistory(stock.ticker)
+        .then(setHistory)
+        .catch(() => setHistory({ ticker: stock.ticker, points: [], count: 0 }));
+    }
+  }, [expanded, history, stock.ticker]);
 
   async function handleAdd(e: React.MouseEvent) {
     e.stopPropagation();
@@ -291,6 +341,15 @@ export function StockCard({ stock }: { stock: StockResult }) {
           );
         })}
       </div>
+
+      {/* ── Trading regime gauges (FLOW / BEARING / PULSE) ── */}
+      {stock.edge?.available && (
+        <div className="flex gap-1.5 px-4 pb-3 -mt-1">
+          <EdgePill name="Flow" gauge={stock.edge.flow} />
+          <EdgePill name="Bearing" gauge={stock.edge.bearing} />
+          <EdgePill name="Pulse" gauge={stock.edge.pulse} />
+        </div>
+      )}
 
       {/* ── Why section ── */}
       {(pros.length > 0 || cons.length > 0) && (
@@ -532,6 +591,35 @@ export function StockCard({ stock }: { stock: StockResult }) {
 
       {expanded && (
         <div className="px-4 py-3 space-y-2.5" style={{ borderTop: "1px solid var(--border)" }}>
+          {/* Score trajectory across past scans */}
+          {history && history.points.length >= 3 && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                  Score trajectory
+                </span>
+                <span className="flex items-center gap-2 text-[9px]" style={{ color: "var(--text-muted)" }}>
+                  <span className="flex items-center gap-1">
+                    <span className="w-[10px] h-[2px] rounded" style={{ backgroundColor: "var(--accent-bright)" }} />
+                    Score
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-[10px] h-[2px] rounded" style={{ backgroundColor: "#ec4899" }} />
+                    AI
+                  </span>
+                  <span>{history.points.length} scans</span>
+                </span>
+              </div>
+              <Sparkline
+                height={40}
+                series={[
+                  { points: history.points.map((p) => p.composite), color: "var(--accent-bright)" },
+                  { points: history.points.map((p) => p.ml_score), color: "#ec4899", dashed: true },
+                ]}
+              />
+            </div>
+          )}
+
           {BUCKETS.map((b) => {
             const bucket = stock.breakdown[b.key];
             if (!bucket) return null;

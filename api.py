@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -12,14 +13,20 @@ from pydantic import BaseModel
 
 
 def _clean(obj):
-    """Recursively convert numpy/pandas types to native Python types."""
+    """Recursively convert numpy/pandas types to native Python types.
+
+    Also maps non-finite floats (NaN/inf) to None — json.dumps raises on them,
+    which would 500 an entire endpoint over one bad yfinance value.
+    """
     if obj is None:
         return None
-    # numpy bool
+    # numpy scalar → native
     if hasattr(obj, "item") and hasattr(obj, "dtype"):
-        return obj.item()
+        obj = obj.item()
     if isinstance(obj, bool):
         return bool(obj)
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -46,6 +53,10 @@ import axt_filter
 import photonics_cycle
 import short_squeeze
 import squeeze_discovery
+import price_history
+import ticker_edge
+import market_regime
+import brief as brief_composer
 
 # Initialize database
 db.init_db()
@@ -87,6 +98,28 @@ squeeze_cache = {
     "scan_in_progress": False,
 }
 
+brief_cache = {"brief": None}
+
+
+def _recompose_brief():
+    """Rebuild the daily brief from current caches. Never raises."""
+    try:
+        scan = {
+            "ranked": cache.get("ranked") or [],
+            "new_tickers": cache.get("new_since_last") or [],
+            "improving": cache.get("improving") or [],
+            "decaying": cache.get("decaying") or [],
+            "breadth": cache.get("breadth") or {},
+        }
+        brief_cache["brief"] = brief_composer.compose_and_polish(
+            market_regime.get_cached(),
+            scan,
+            watchlist=db.get_watchlist(),
+            squeeze=squeeze_cache.get("results") or [],
+        )
+    except Exception as e:
+        logger.error(f"Brief compose failed: {e}")
+
 
 def _run_full_pipeline():
     """Run the full discover → score pipeline. Called by background task."""
@@ -125,21 +158,34 @@ def _run_full_pipeline():
             old_tickers = {r["ticker"] for r in cache["ranked"]}
             new_tickers = [r["ticker"] for r in ranked_list if r["ticker"] not in old_tickers]
 
-        # Step 5: Detect score changes (stocks improving)
+        # Step 5: Detect score changes (stocks improving / decaying)
         improving = []
+        decaying = []
         if cache["results"]:
             for ticker, result in results.items():
                 old = cache["results"].get(ticker)
                 if old:
                     old_score = old.get("composite", 0)
                     new_score = result["composite"]
-                    if new_score - old_score >= 5:  # improved by 5+ points
-                        improving.append({
-                            "ticker": ticker,
-                            "old_score": old_score,
-                            "new_score": new_score,
-                            "change": round(new_score - old_score, 1),
-                        })
+                    delta = new_score - old_score
+                    entry = {
+                        "ticker": ticker,
+                        "old_score": old_score,
+                        "new_score": new_score,
+                        "change": round(delta, 1),
+                    }
+                    if delta >= 5:  # improved by 5+ points
+                        improving.append(entry)
+                    elif delta <= -5:  # faded by 5+ points
+                        decaying.append(entry)
+
+        # Step 6: Universe breadth from the edge gauges (zero extra fetches)
+        flags = [r.get("edge", {}).get("above_20ma") for r in results.values()]
+        flags = [f for f in flags if f is not None]
+        breadth = {
+            "pct_above_20ma": round(100 * sum(flags) / len(flags), 1) if flags else None,
+            "n": len(flags),
+        }
 
         # Update cache
         cache["results"] = results
@@ -147,6 +193,8 @@ def _run_full_pipeline():
         cache["alerts"] = alerts
         cache["new_since_last"] = new_tickers
         cache["improving"] = improving
+        cache["decaying"] = decaying
+        cache["breadth"] = breadth
         cache["last_scan"] = datetime.now().isoformat()
         cache["scan_in_progress"] = False
 
@@ -164,10 +212,13 @@ def _run_full_pipeline():
         except Exception as e:
             logger.error(f"Failed to send alerts: {e}")
 
+        # ─── Recompose the daily brief on fresh scan data ───
+        _recompose_brief()
+
         logger.info(
             f"Pipeline done: {len(ranked_list)} scored, "
             f"{len(alerts)} alerts, {len(new_tickers)} new, "
-            f"{len(improving)} improving"
+            f"{len(improving)} improving, {len(decaying)} decaying"
         )
 
     except Exception as e:
@@ -224,14 +275,63 @@ def _run_axt_pipeline(tickers: list[str] | None = None):
     logger.info(f"AXT scan done: {len(results)} tickers, {sum(1 for r in results if r['is_candidate'])} candidates")
 
 
+def _run_regime_pipeline():
+    """Refresh the market regime (and recompose the brief on top of it)."""
+    breadth = cache.get("breadth") or {}
+    market_regime.refresh(
+        breadth_universe_pct=breadth.get("pct_above_20ma"),
+        universe_n=breadth.get("n"),
+    )
+    _recompose_brief()
+
+
+async def _regime_loop():
+    """Refresh the market regime every REGIME_INTERVAL."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(config.REGIME_INTERVAL)
+        try:
+            await loop.run_in_executor(pool, _run_regime_pipeline)
+        except Exception as e:
+            logger.error(f"Regime refresh error: {e}")
+
+
+def _run_secondary_pipelines():
+    """Rerun the heavier discovery scanners (AXT, photonics, squeeze)."""
+    loop = asyncio.get_event_loop()
+    # Submit to the pool; each manages its own work and must not block each other
+    loop.run_in_executor(pool, _run_axt_pipeline, None)
+    loop.run_in_executor(pool, _run_photonics_pipeline)
+    loop.run_in_executor(pool, _run_squeeze_pipeline)
+
+
+async def _secondary_loop():
+    """Keep AXT / photonics / squeeze scans fresh on the same cadence as the main scan.
+
+    Without this they only ran once at startup and went stale (the squeeze
+    scanner in particular is the whole point of the Squeeze tab).
+    """
+    while True:
+        await asyncio.sleep(SCAN_INTERVAL)
+        try:
+            _run_secondary_pipelines()
+        except Exception as e:
+            logger.error(f"Secondary scan error: {e}")
+
+
 async def _background_scanner():
     """Background task that runs the pipeline periodically."""
     loop = asyncio.get_event_loop()
+    # Regime first so the first scan/brief has market context, then keep it fresh
+    await loop.run_in_executor(pool, _run_regime_pipeline)
+    asyncio.create_task(_regime_loop())
+
     await loop.run_in_executor(pool, _run_full_pipeline)
-    # Run AXT + photonics + squeeze discovery scans after main pipeline
-    asyncio.create_task(loop.run_in_executor(pool, _run_axt_pipeline, None))
-    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
-    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
+    # Kick the heavier discovery scanners once now, then keep them fresh on a loop.
+    # NOTE: run_in_executor submits to the pool and returns a Future —
+    # do NOT wrap in asyncio.create_task (it requires a coroutine and raises).
+    _run_secondary_pipelines()
+    asyncio.create_task(_secondary_loop())
 
     # Then every SCAN_INTERVAL
     while True:
@@ -286,6 +386,15 @@ class ConfigUpdate(BaseModel):
 
 # --- Helpers ---
 
+def _num(x, default=0.0) -> float:
+    """Coerce to a finite float; yfinance loves returning None/NaN."""
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     """Score a single ticker across all buckets."""
     if weights:
@@ -293,13 +402,21 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
             if k in config.WEIGHTS:
                 config.WEIGHTS[k] = v
 
+    # Shared daily history — fetched once, reused by momentum + edge gauges
+    hist = price_history.get_history(ticker)
+    yf_info = None
+
     bucket_scores = {
         "fundamentals": fundamentals.score(ticker),
-        "momentum": momentum.score(ticker),
+        "momentum": momentum.score(ticker, hist=hist),
         "catalyst": catalysts.score(ticker),
         "insider": insiders.score(ticker),
         "sentiment": news_sentiment.score(ticker),
     }
+    # Kill NaN at the source — a single NaN bucket poisons the composite,
+    # the ML layer, ranking sorts, and JSON serialization
+    for b in bucket_scores.values():
+        b["score"] = _num(b.get("score", 0))
     result = scorer.composite_score(bucket_scores)
 
     # Add price/market data
@@ -326,8 +443,9 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         else:
             import yfinance as yf
             info = yf.Ticker(ticker).info or {}
-            price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-            prev = info.get("previousClose", price)
+            yf_info = info
+            price = _num(info.get("currentPrice") or info.get("regularMarketPrice", 0))
+            prev = _num(info.get("previousClose", price), default=price)
             change_pct = ((price - prev) / prev * 100) if prev else 0
             # Short description
             desc = info.get("longBusinessSummary", "") or info.get("longName", "")
@@ -335,12 +453,12 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 desc = desc[:160].rsplit(" ", 1)[0] + "…"
             result["quote"] = {
                 "price": price,
-                "change_pct": change_pct,
-                "market_cap": info.get("marketCap", 0),
-                "volume": info.get("volume", 0),
-                "avg_volume": info.get("averageVolume", 0),
-                "year_high": info.get("fiftyTwoWeekHigh", 0),
-                "year_low": info.get("fiftyTwoWeekLow", 0),
+                "change_pct": _num(change_pct),
+                "market_cap": _num(info.get("marketCap", 0)),
+                "volume": _num(info.get("volume", 0)),
+                "avg_volume": _num(info.get("averageVolume", 0)),
+                "year_high": _num(info.get("fiftyTwoWeekHigh", 0)),
+                "year_low": _num(info.get("fiftyTwoWeekLow", 0)),
                 "sector": info.get("sector", ""),
                 "industry": info.get("industry", ""),
                 "name": info.get("shortName", ticker) or info.get("longName", ticker),
@@ -377,11 +495,17 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         breakout["score"] * 0.45 +
         sector["score"] * 0.20
     )
-    result["ml_score"] = round(ml_score, 1)
+    result["ml_score"] = round(_num(ml_score), 1)
 
-    # Short squeeze potential
-    squeeze = short_squeeze.score(ticker, bucket_scores)
+    # Short squeeze potential — reuse the already-fetched yfinance info
+    squeeze = short_squeeze.score(ticker, bucket_scores, yf_info=yf_info)
     result["short_squeeze"] = squeeze
+
+    # Trading-regime gauges (FLOW / BEARING / PULSE) from the shared history
+    try:
+        result["edge"] = ticker_edge.compute(ticker, hist)
+    except Exception:
+        result["edge"] = dict(ticker_edge.UNAVAILABLE)
 
     return result
 
@@ -435,12 +559,21 @@ async def dashboard():
     Main endpoint — returns cached results instantly.
     No waiting. Background scanner keeps data fresh.
     """
+    regime = market_regime.get_cached()
     return _clean({
         "universe": cache["universe"],
         "ranked": cache["ranked"],
         "alerts": cache["alerts"],
         "new_tickers": cache.get("new_since_last", []),
         "improving": cache.get("improving", []),
+        "decaying": cache.get("decaying", []),
+        "breadth": cache.get("breadth"),
+        "market_regime": {
+            "score": regime.get("mood", {}).get("score"),
+            "label": regime.get("mood", {}).get("label"),
+            "vix": regime.get("volatility", {}).get("vix"),
+            "as_of": regime.get("as_of"),
+        } if regime.get("available") else None,
         "last_scan": cache["last_scan"],
         "scan_in_progress": cache["scan_in_progress"],
         "next_scan_in": _next_scan_seconds(),
@@ -465,9 +598,7 @@ async def force_scan():
     if cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(
-        loop.run_in_executor(pool, _run_full_pipeline)
-    )
+    loop.run_in_executor(pool, _run_full_pipeline)
     return {"status": "started"}
 
 
@@ -727,9 +858,7 @@ async def run_axt_scan(req: AxtScanRequest):
     if axt_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(
-        loop.run_in_executor(pool, _run_axt_pipeline, req.tickers)
-    )
+    loop.run_in_executor(pool, _run_axt_pipeline, req.tickers)
     return {"status": "started"}
 
 
@@ -762,7 +891,7 @@ async def rescan_photonics_cycle():
     if photonics_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
+    loop.run_in_executor(pool, _run_photonics_pipeline)
     return {"status": "started"}
 
 
@@ -780,6 +909,46 @@ async def photonics_score_single(ticker: str):
         "phases": results,
         "best_phase": max(results.items(), key=lambda x: x[1]["phase_score"])[0],
     })
+
+
+# ────────────────────────────────────────────
+# Market Regime / Brief / History endpoints
+# ────────────────────────────────────────────
+
+@app.get("/api/market-regime")
+async def get_market_regime():
+    """Cached market-regime payload (mood, indices, volatility, sectors, narrative)."""
+    return _clean(market_regime.get_cached())
+
+
+@app.post("/api/market-regime/refresh")
+async def refresh_market_regime():
+    """Trigger an immediate regime refresh."""
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(pool, _run_regime_pipeline)
+    return {"status": "started"}
+
+
+@app.get("/api/brief")
+async def get_brief():
+    """The latest composed daily brief (template or LLM-polished)."""
+    return _clean({"brief": brief_cache.get("brief"), "last_scan": cache.get("last_scan")})
+
+
+@app.get("/api/history/{ticker}")
+async def get_score_history(ticker: str):
+    """Score history for sparklines, from scan snapshots (ascending)."""
+    rows = db.get_snapshots(ticker.upper())
+    points = [
+        {
+            "scan_date": r["scan_date"],
+            "composite": r.get("composite_score"),
+            "ml_score": r.get("ml_score"),
+            "price": r.get("price"),
+        }
+        for r in reversed(rows)
+    ]
+    return _clean({"ticker": ticker.upper(), "points": points, "count": len(points)})
 
 
 # ────────────────────────────────────────────
@@ -803,7 +972,7 @@ async def rescan_squeeze():
     if squeeze_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
+    loop.run_in_executor(pool, _run_squeeze_pipeline)
     return {"status": "started"}
 
 

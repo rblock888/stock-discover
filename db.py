@@ -58,6 +58,21 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts_sent(ticker, alert_type)")
 
+        # Daily market-regime snapshots (last write of the day wins)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS regime_snapshots (
+                snap_date TEXT PRIMARY KEY,
+                mood_score REAL,
+                label TEXT,
+                vix REAL,
+                vix_pctile REAL,
+                smallcap_score REAL,
+                breadth_universe REAL,
+                breadth_sectors REAL,
+                created_at TEXT
+            )
+        """)
+
         conn.commit()
 
 
@@ -84,7 +99,7 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
 
     with get_conn() as conn:
         c = conn.cursor()
-        for stock in ranked_stocks[:30]:
+        for stock in ranked_stocks[:40]:
             ticker = stock.get("ticker")
             if not ticker:
                 continue
@@ -138,6 +153,43 @@ def get_oldest_snapshot_per_ticker(min_days_old: int = 7) -> list:
             ORDER BY s.scan_date ASC
         """).fetchall()
         return [dict(r) for r in rows]
+
+
+# ────────────────────────────────────────────
+# Market regime snapshots
+# ────────────────────────────────────────────
+
+def save_regime_snapshot(snap: dict):
+    """Upsert today's regime snapshot (last write of the day wins)."""
+    snap_date = datetime.now().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO regime_snapshots
+            (snap_date, mood_score, label, vix, vix_pctile, smallcap_score,
+             breadth_universe, breadth_sectors, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            snap_date,
+            snap.get("mood_score"),
+            snap.get("label"),
+            snap.get("vix"),
+            snap.get("vix_pctile"),
+            snap.get("smallcap_score"),
+            snap.get("breadth_universe"),
+            snap.get("breadth_sectors"),
+            datetime.now().isoformat(),
+        ))
+        conn.commit()
+
+
+def get_regime_strip(days: int = 10) -> list:
+    """Last N daily regime snapshots, ascending by date."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM regime_snapshots ORDER BY snap_date DESC LIMIT ?",
+            (days,)
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
 
 # ────────────────────────────────────────────

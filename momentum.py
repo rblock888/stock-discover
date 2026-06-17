@@ -100,13 +100,13 @@ def _fmp_score(ticker: str) -> dict:
     return _calc_momentum(closes, volumes)
 
 
-def _yf_score(ticker: str) -> dict:
-    """Fallback to yfinance."""
+def _yf_score(ticker: str, hist=None) -> dict:
+    """Fallback to yfinance (via the shared, TTL-cached price_history fetcher)."""
     try:
-        import yfinance as yf
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
-        if hist.empty or len(hist) < config.MA_LONG:
+        import price_history
+        if hist is None:
+            hist = price_history.get_history(ticker, period="1y")
+        if hist is None or hist.empty or len(hist) < config.MA_LONG:
             return {"score": 0, "details": "Insufficient history", "components": {}}
 
         closes = hist["Close"].tolist()
@@ -114,10 +114,10 @@ def _yf_score(ticker: str) -> dict:
 
         result = _calc_momentum(list(reversed(closes)), list(reversed(volumes)))
 
-        # Add SPY comparison if possible
+        # Add SPY comparison if possible — SPY is fetched once per cycle, not per ticker
         try:
-            spy = yf.Ticker("SPY").history(period="6mo")
-            if not spy.empty:
+            spy = price_history.get_history("SPY", period="1y")
+            if spy is not None and not spy.empty:
                 days = min(config.RS_LOOKBACK_DAYS, len(closes) - 1, len(spy) - 1)
                 if days > 10:
                     stock_ret = (closes[-1] / closes[-days]) - 1
@@ -133,8 +133,8 @@ def _yf_score(ticker: str) -> dict:
         return {"score": 0, "details": "Failed to fetch data", "components": {}}
 
 
-def score(ticker: str) -> dict:
-    """Return a momentum score (0-100)."""
+def score(ticker: str, hist=None) -> dict:
+    """Return a momentum score (0-100). Accepts a pre-fetched daily history frame."""
     if fmp.is_configured():
         return _fmp_score(ticker)
-    return _yf_score(ticker)
+    return _yf_score(ticker, hist=hist)

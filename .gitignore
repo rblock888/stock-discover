@@ -5,3 +5,10 @@ __pycache__/
 node_modules/
 .next/
 frontend/.env.local
+
+# Runtime SQLite DB (regenerated each scan)
+data.db
+*.db
+
+# Machine-local Claude settings
+.claude/settings.local.json

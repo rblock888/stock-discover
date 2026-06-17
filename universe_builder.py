@@ -119,7 +119,8 @@ def from_finviz_microcap(max_tickers: int = 80) -> list:
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             if resp.status_code != 200:
                 break
-            matches = re.findall(r'quote\.ashx\?t=([A-Z]{1,5})', resp.text)
+            # Finviz moved from quote.ashx?t= to stock?t= links (2026) — match both
+            matches = re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text)
             unique = []
             for m in matches:
                 if m not in tickers and m not in unique:
@@ -162,14 +163,15 @@ def from_finviz(max_tickers: int = 100) -> list:
                 break
 
             # Extract tickers from the screener table
+            # (Finviz moved from quote.ashx?t= to stock?t= links in 2026 — match both)
             matches = re.findall(
-                r'<a href="quote\.ashx\?t=([A-Z]+)&ty=c[^"]*"[^>]*class="tab-link"',
+                r'<a href="(?:quote\.ashx|stock)\?t=([A-Z]+)&ty=c[^"]*"[^>]*class="tab-link"',
                 resp.text,
             )
             if not matches:
                 # Try alternative pattern
                 matches = re.findall(
-                    r'quote\.ashx\?t=([A-Z]{1,5})',
+                    r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})',
                     resp.text,
                 )
             tickers.extend(matches)

@@ -35,7 +35,8 @@ def _finviz_screen(filters: str, max_tickers: int = 80) -> list:
             if resp.status_code != 200:
                 break
             batch = []
-            for t in re.findall(r'quote\.ashx\?t=([A-Z]{1,5})', resp.text):
+            # Finviz moved from quote.ashx?t= to stock?t= links (2026) — match both
+            for t in re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text):
                 if t not in seen:
                     seen.add(t)
                     batch.append(t)

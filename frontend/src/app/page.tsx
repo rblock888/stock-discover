@@ -17,10 +17,11 @@ import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { BacktestPanel } from "@/components/BacktestPanel";
 import { ManualLookup } from "@/components/ManualLookup";
 import { PhotonicsCycle } from "@/components/PhotonicsCycle";
+import { Overview } from "@/components/Overview";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type Tab = "picks" | "squeeze" | "photonics" | "portfolio" | "tools";
+type Tab = "overview" | "picks" | "squeeze" | "photonics" | "portfolio" | "tools";
 
 type Segment = {
   id: string;
@@ -492,6 +493,7 @@ function SqueezeView({ segments }: { segments: Segment[] }) {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
+  { id: "overview",  label: "Overview",  icon: "◉" },
   { id: "picks",     label: "Picks",     icon: "★" },
   { id: "squeeze",   label: "Squeeze",   icon: "⚡" },
   { id: "photonics", label: "Photonics", icon: "◎" },
@@ -640,7 +642,7 @@ function Sidebar({
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [tab, setTab] = useState<Tab>("picks");
+  const [tab, setTab] = useState<Tab>("overview");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -743,6 +745,10 @@ export default function Home() {
         )}
 
         {/* Tab content */}
+        {tab === "overview" && (
+          <Overview data={data} onNavigate={(t) => setTab(t as Tab)} />
+        )}
+
         {tab === "picks" && (
           <PicksView segments={segments} ranked={data?.ranked ?? []} />
         )}

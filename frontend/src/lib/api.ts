@@ -32,9 +32,30 @@ export interface ShortSqueezeResult {
   details: string;
 }
 
+export interface EdgeGauge {
+  state: string;
+  score: number;
+  summary: string;
+  advice: string[];
+  rvol?: number;
+  er?: number;
+  slope10_pct?: number;
+  atr_pct?: number;
+  atr_pctile?: number;
+}
+
+export interface EdgeBlock {
+  available: boolean;
+  above_20ma: boolean | null;
+  flow?: EdgeGauge;
+  bearing?: EdgeGauge;
+  pulse?: EdgeGauge;
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
+  edge?: EdgeBlock;
   breakdown: {
     fundamentals: BucketScore;
     momentum: BucketScore;
@@ -175,12 +196,22 @@ export async function scoreSingle(ticker: string): Promise<StockResult> {
   return fetcher(`/api/score/${ticker}`);
 }
 
+export interface ScoreDelta {
+  ticker: string;
+  old_score: number;
+  new_score: number;
+  change: number;
+}
+
 export interface DashboardResponse {
   universe: UniverseResponse | null;
   ranked: StockResult[];
   alerts: string[];
   new_tickers: string[];
-  improving: { ticker: string; old_score: number; new_score: number; change: number }[];
+  improving: ScoreDelta[];
+  decaying: ScoreDelta[];
+  breadth: { pct_above_20ma: number | null; n: number } | null;
+  market_regime: { score: number; label: string; vix: number; as_of: string } | null;
   last_scan: string | null;
   scan_in_progress: boolean;
   next_scan_in: number;
@@ -406,4 +437,86 @@ export async function getSqueezeScan(): Promise<SqueezeScanResponse> {
 
 export async function rescanSqueeze(): Promise<{ status: string }> {
   return fetcher("/api/squeeze-scan/rescan", { method: "POST" });
+}
+
+// ─── Market Regime ───
+
+export interface IndexTrend {
+  state: "UPTREND" | "PULLBACK" | "RECOVERY" | "DOWNTREND" | "CHOP";
+  points: number;
+  close: number;
+  vs_20ma_pct: number;
+  ret_1m_pct: number | null;
+}
+
+export interface SectorHeat {
+  etf: string;
+  name: string;
+  ret_1m_pct: number | null;
+  ret_5d_pct: number | null;
+  above_20ma: boolean;
+}
+
+export interface RegimeStripDay {
+  snap_date: string;
+  mood_score: number;
+  label: string;
+  vix: number;
+}
+
+export interface MarketRegimeResponse {
+  available: boolean;
+  as_of?: string;
+  stale?: boolean;
+  mood?: { score: number; label: "RISK-ON" | "NEUTRAL" | "RISK-OFF" };
+  indices?: Record<string, IndexTrend>;
+  volatility?: { state: "QUIET" | "TRADABLE" | "WILD"; vix: number; percentile: number; change_5d_pct: number | null; score: number };
+  smallcap?: { state: "HOT" | "NEUTRAL" | "COLD"; score: number; rel_1m_pct: number | null; rel_3m_pct: number | null };
+  sectors?: SectorHeat[];
+  breadth?: { universe_pct: number | null; universe_n: number | null; sectors_pct: number };
+  narrative?: string;
+  advice?: string[];
+  strip?: RegimeStripDay[];
+}
+
+export async function getMarketRegime(): Promise<MarketRegimeResponse> {
+  return fetcher("/api/market-regime");
+}
+
+// ─── Daily Brief ───
+
+export interface BriefBullet {
+  type: "new" | "improving" | "decaying" | "squeeze" | "pick" | "watchlist";
+  text: string;
+}
+
+export interface Brief {
+  headline: string;
+  paragraph: string;
+  bullets: BriefBullet[];
+  generated_at: string;
+  source: "template" | "llm";
+}
+
+export async function getBrief(): Promise<{ brief: Brief | null; last_scan: string | null }> {
+  return fetcher("/api/brief");
+}
+
+// ─── Score history ───
+
+export interface HistoryPoint {
+  scan_date: string;
+  composite: number | null;
+  ml_score: number | null;
+  price: number | null;
+}
+
+export interface HistoryResponse {
+  ticker: string;
+  points: HistoryPoint[];
+  count: number;
+}
+
+export async function getHistory(ticker: string): Promise<HistoryResponse> {
+  return fetcher(`/api/history/${ticker}`);
 }

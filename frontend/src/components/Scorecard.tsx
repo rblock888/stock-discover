@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   CalibrationCurve,
+  EvidenceWeights,
   Scorecard,
   ScorecardResponse,
   SignalCard,
+  TiltAB,
   getScorecard,
 } from "@/lib/api";
 
@@ -144,6 +146,8 @@ export function ScorecardPanel() {
   useEffect(() => { load(); }, [load]);
 
   const ds = data?.data_status;
+  const ew = data?.evidence_weights;
+  const ab = data?.tilt_ab;
   const cards = data?.scorecards ?? {};
   const available = Object.entries(cards).filter(([, c]) => c.available).map(([h]) => Number(h)).sort((a, b) => a - b);
   const active: Scorecard | undefined = cards[String(horizon)];
@@ -217,6 +221,19 @@ export function ScorecardPanel() {
             ))}
           </div>
 
+          {/* Signal tuning — auto-activates as per-bucket + tilt data matures */}
+          {(ew || ab) && (
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-[0.1em] font-bold mb-2" style={{ color: "var(--text-muted)" }}>
+                Signal tuning · self-activating as data accrues
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {ew && <EvidenceWeightsCard ew={ew} />}
+                {ab && <TiltABCard ab={ab} />}
+              </div>
+            </div>
+          )}
+
           {/* Calibration */}
           {cal?.available && (
             <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--border-subtle)" }}>
@@ -242,5 +259,99 @@ function Stat({ label, value, color }: { label: string; value: string; color: st
       <div className="text-[20px] font-bold tabular-nums leading-none" style={{ fontFamily: "var(--font-mono)", color }}>{value}</div>
       <div className="text-[9px] uppercase tracking-[0.06em] mt-1.5" style={{ color: "var(--text-muted)" }}>{label}</div>
     </div>
+  );
+}
+
+// ─── Signal tuning — auto-activates as data matures ──────────────────────────
+
+function AccrualBar({ n, need }: { n: number; need: number }) {
+  const pct = Math.min(100, (n / need) * 100);
+  return (
+    <div>
+      <div className="h-[6px] rounded-full overflow-hidden" style={{ backgroundColor: "rgba(255,255,255,0.06)" }}>
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: "linear-gradient(90deg, color-mix(in srgb, var(--accent-bright) 50%, transparent), var(--accent-bright))" }} />
+      </div>
+      <div className="text-[10px] mt-1 tabular-nums" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{n} / {need} resolved</div>
+    </div>
+  );
+}
+
+function TuningCard({ title, status, children }: { title: string; status: "ready" | "accruing"; children: React.ReactNode }) {
+  const ready = status === "ready";
+  return (
+    <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--border-subtle)" }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[12px] font-semibold">{title}</span>
+        <span className="text-[9px] font-bold uppercase tracking-[0.06em] px-2 py-[2px] rounded-full"
+          style={{ backgroundColor: ready ? "var(--green-dim)" : "var(--amber-dim)", color: ready ? "var(--green)" : "var(--amber)" }}>
+          {ready ? "ready" : "accruing"}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function EvidenceWeightsCard({ ew }: { ew: EvidenceWeights }) {
+  const order = ["fundamentals", "momentum", "catalyst", "insider", "sentiment"];
+  return (
+    <TuningCard title="Evidence-based weights" status={ew.status}>
+      {ew.status === "accruing" ? (
+        <>
+          <p className="text-[10px] mb-2" style={{ color: "var(--text-muted)" }}>{ew.detail}</p>
+          <AccrualBar n={ew.n} need={ew.need ?? 120} />
+        </>
+      ) : (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-[88px_1fr_46px_46px] gap-2 text-[9px] uppercase tracking-[0.05em]" style={{ color: "var(--text-muted)" }}>
+            <span>bucket</span><span>IC</span><span className="text-right">now</span><span className="text-right">rec</span>
+          </div>
+          {order.map((b) => {
+            const ic = ew.bucket_ic?.[b] ?? 0;
+            const cur = (ew.current_weights?.[b] ?? 0) * 100;
+            const rec = (ew.recommended_weights?.[b] ?? 0) * 100;
+            const max = Math.max(0.15, ...order.map((x) => Math.abs(ew.bucket_ic?.[x] ?? 0)));
+            return (
+              <div key={b} className="grid grid-cols-[88px_1fr_46px_46px] gap-2 items-center text-[10px]">
+                <span className="capitalize" style={{ color: "var(--text-secondary)" }}>{b}</span>
+                <div className="h-[7px] rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.06)" }}>
+                  <div className="h-full rounded-full" style={{ width: `${(Math.abs(ic) / max) * 100}%`, background: ic >= 0 ? "var(--green)" : "var(--red)" }} />
+                </div>
+                <span className="text-right tabular-nums" style={{ fontFamily: "var(--font-mono)", color: ic >= 0.04 ? "var(--green)" : "var(--text-muted)" }}>{ic >= 0 ? "+" : ""}{ic.toFixed(2)}</span>
+                <span className="text-right tabular-nums" style={{ fontFamily: "var(--font-mono)", color: rec > cur ? "var(--green)" : rec < cur ? "var(--red)" : "var(--text-secondary)" }}>{rec.toFixed(0)}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </TuningCard>
+  );
+}
+
+function TiltABCard({ ab }: { ab: TiltAB }) {
+  return (
+    <TuningCard title="Regime tilt — does it help?" status={ab.status}>
+      {ab.status === "accruing" ? (
+        <>
+          <p className="text-[10px] mb-2" style={{ color: "var(--text-muted)" }}>{ab.detail}</p>
+          <AccrualBar n={ab.n} need={ab.need ?? 80} />
+        </>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>IC base {ab.ic_base?.toFixed(2)} →</span>
+            <span className="text-[13px] font-bold tabular-nums" style={{ fontFamily: "var(--font-mono)", color: ab.tilt_helps ? "var(--green)" : "var(--red)" }}>
+              tilted {ab.ic_tilt?.toFixed(2)}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-[1px] rounded" style={{ backgroundColor: ab.tilt_helps ? "var(--green-dim)" : "var(--red-dim)", color: ab.tilt_helps ? "var(--green)" : "var(--red)" }}>
+              {ab.tilt_helps ? "helps" : "no lift"}
+            </span>
+          </div>
+          <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+            top-quartile return: base {ab.top_quartile_base_pct}% vs tilted {ab.top_quartile_tilt_pct}%
+          </div>
+        </div>
+      )}
+    </TuningCard>
   );
 }

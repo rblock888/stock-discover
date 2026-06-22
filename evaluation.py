@@ -13,6 +13,7 @@ scores can finally be checked against reality:
 Pure numpy (no scipy/sklearn). yfinance accessed only through price_history.
 """
 
+import json
 import logging
 import math
 from datetime import datetime
@@ -20,6 +21,7 @@ from datetime import datetime
 import numpy as np
 
 import db
+import config
 import price_history
 
 logger = logging.getLogger("discovery")
@@ -27,6 +29,11 @@ logger = logging.getLogger("discovery")
 HORIZONS = [5, 10, 20, 60]      # trading days
 WIN_THRESHOLD = 0.10            # "win" = +10% forward return
 SIGNALS = ["composite_score", "ml_score", "early_score"]
+BUCKETS = ["fundamentals", "momentum", "catalyst", "insider", "sentiment"]
+
+# Minimum sample before a measured result is trusted (vs "accruing")
+MIN_N_EVIDENCE = 120
+MIN_N_TILT = 80
 
 _cache = {"scorecard": None, "calibration": {}, "last_run": None, "coverage": None}
 
@@ -303,6 +310,104 @@ def calibrated_p_win(score: float, signal: str = "composite_score", horizon: int
     return float(np.interp(score, xs, ps))
 
 
+def _feature_lookup() -> dict:
+    """Daily-grain {(ticker, day): feature-row} (last snapshot of each day)."""
+    out = {}
+    for f in db.get_snapshot_features():
+        sd = f.get("scan_date")
+        if f.get("ticker") and sd:
+            out[(f["ticker"], sd[:10])] = f
+    return out
+
+
+def evidence_weights(horizon: int = 5) -> dict:
+    """Per-bucket Information Coefficient vs forward return → evidence-based weights.
+
+    Measures which buckets actually predict and what the composite weights
+    *should* be (∝ positive IC). Reports current vs recommended but does NOT
+    auto-apply — it stays "accruing" until per-bucket data (persisted from
+    2026-06-22) resolves enough forward returns to be trustworthy.
+    """
+    rets = db.get_snapshot_returns(horizon)
+    feats = _feature_lookup()
+    paired = []  # (bucket_dict, fwd_return)
+    for r in rets:
+        f = feats.get((r["ticker"], r["snap_day"]))
+        if not f or not f.get("bucket_scores"):
+            continue
+        try:
+            bs = json.loads(f["bucket_scores"])
+        except Exception:
+            continue
+        if any(bs.get(b) is not None for b in BUCKETS):
+            paired.append((bs, r["fwd_return"]))
+
+    n = len(paired)
+    current = dict(config.WEIGHTS)
+    if n < MIN_N_EVIDENCE:
+        return {"available": False, "status": "accruing", "n": n,
+                "need": MIN_N_EVIDENCE, "horizon": horizon,
+                "current_weights": current,
+                "detail": f"Per-bucket scores resolve from 2026-06-22 — {n}/{MIN_N_EVIDENCE} forward returns so far."}
+
+    rt = np.array([p[1] for p in paired], dtype=float)
+    ics, pos = {}, {}
+    for b in BUCKETS:
+        sc = np.array([p[0].get(b) if p[0].get(b) is not None else np.nan for p in paired], dtype=float)
+        m = ~np.isnan(sc)
+        ic = _spearman(sc[m], rt[m]) if m.sum() >= MIN_N_EVIDENCE else 0.0
+        ics[b] = round(ic, 3)
+        pos[b] = max(0.0, ic)
+
+    total = sum(pos.values())
+    recommended = ({b: round(pos[b] / total, 3) for b in BUCKETS} if total > 0 else current)
+    return {
+        "available": True, "status": "ready", "n": n, "horizon": horizon,
+        "bucket_ic": ics,
+        "current_weights": current,
+        "recommended_weights": recommended,
+        "detail": "Evidence-based weights ∝ each bucket's positive IC vs forward return.",
+    }
+
+
+def tilt_ab(horizon: int = 5) -> dict:
+    """Did the regime tilt help? Compare tilted (rank_score) vs base (composite)
+    ordering on realized forward returns. Accrues until tilted snapshots age."""
+    rets = db.get_snapshot_returns(horizon)
+    feats = _feature_lookup()
+    rows = []
+    for r in rets:
+        f = feats.get((r["ticker"], r["snap_day"]))
+        if f and f.get("tilt_factor") is not None and f.get("rank_score") is not None:
+            rows.append((f["composite_score"], f["rank_score"], f["tilt_factor"], r["fwd_return"]))
+
+    n = len(rows)
+    moved = sum(1 for c, rk, tf, _ in rows if abs((tf or 1) - 1) >= 0.04)
+    if n < MIN_N_TILT or moved < 20:
+        return {"available": False, "status": "accruing", "n": n, "moved": moved,
+                "need": MIN_N_TILT, "horizon": horizon,
+                "detail": f"Regime tilt persists from 2026-06-22; needs tilted picks to age {horizon}d — {n}/{MIN_N_TILT} resolved, {moved} actually tilted."}
+
+    comp = np.array([r[0] for r in rows], dtype=float)
+    rank = np.array([r[1] for r in rows], dtype=float)
+    ret = np.array([r[3] for r in rows], dtype=float)
+    ic_base = _spearman(comp, ret)
+    ic_tilt = _spearman(rank, ret)
+    # Top-quartile mean forward return under each ordering
+    k = max(1, n // 4)
+    top_base = float(np.mean(ret[np.argsort(comp)[-k:]]))
+    top_tilt = float(np.mean(ret[np.argsort(rank)[-k:]]))
+    return {
+        "available": True, "status": "ready", "n": n, "horizon": horizon,
+        "ic_base": round(ic_base, 3), "ic_tilt": round(ic_tilt, 3),
+        "ic_delta": round(ic_tilt - ic_base, 3),
+        "top_quartile_base_pct": round(top_base * 100, 2),
+        "top_quartile_tilt_pct": round(top_tilt * 100, 2),
+        "tilt_helps": ic_tilt > ic_base,
+        "detail": "Tilted ranking (rank_score) vs base (composite) on realized returns.",
+    }
+
+
 def refresh(horizons=None) -> dict:
     """Recompute forward returns + scorecard + calibration. Never raises."""
     try:
@@ -312,6 +417,9 @@ def refresh(horizons=None) -> dict:
             for sig in ("composite_score", "ml_score"):
                 calibration(sig, h)
         _cache["scorecard"] = cards
+        # Tuning analyses (auto-activate as the per-bucket / tilt data matures)
+        _cache["evidence_weights"] = evidence_weights(5)
+        _cache["tilt_ab"] = tilt_ab(5)
         return {"coverage": cov, "scorecards": cards}
     except Exception as e:
         logger.error(f"evaluation.refresh failed: {e}")
@@ -347,4 +455,6 @@ def get_cached() -> dict:
         "data_status": data_status(),
         "last_run": _cache.get("last_run"),
         "calibration": {f"{k[0]}@{k[1]}": v for k, v in _cache.get("calibration", {}).items()},
+        "evidence_weights": _cache.get("evidence_weights") or evidence_weights(5),
+        "tilt_ab": _cache.get("tilt_ab") or tilt_ab(5),
     }

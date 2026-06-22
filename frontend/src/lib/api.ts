@@ -584,11 +584,41 @@ export interface DataStatus {
   horizons: number[];
 }
 
+export interface EvidenceWeights {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  need?: number;
+  horizon: number;
+  bucket_ic?: Record<string, number>;
+  current_weights: Record<string, number>;
+  recommended_weights?: Record<string, number>;
+  detail: string;
+}
+
+export interface TiltAB {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  moved?: number;
+  need?: number;
+  horizon: number;
+  ic_base?: number;
+  ic_tilt?: number;
+  ic_delta?: number;
+  top_quartile_base_pct?: number;
+  top_quartile_tilt_pct?: number;
+  tilt_helps?: boolean;
+  detail: string;
+}
+
 export interface ScorecardResponse {
   scorecards: Record<string, Scorecard> | null;
   data_status: DataStatus;
   last_run: string | null;
   calibration: Record<string, CalibrationCurve>;
+  evidence_weights?: EvidenceWeights;
+  tilt_ab?: TiltAB;
 }
 
 export async function getScorecard(): Promise<ScorecardResponse> {

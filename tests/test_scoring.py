@@ -226,3 +226,32 @@ def test_junk_tickers_rejected(junk):
 @pytest.mark.parametrize("real", ["NVDA", "LWLG", "IONQ", "TGTX", "MU", "AMD"])
 def test_real_tickers_kept(real):
     assert universe_builder._looks_like_ticker(real)
+
+
+# ── pre_breakout: catch coils, flag the already-flown ────────────────────────
+
+import pre_breakout
+
+
+def test_pre_breakout_flags_already_flown_as_extended():
+    # flat base then a sharp run = the "flew to the roof" chart = EXTENDED
+    closes = [10.0] * 90 + list(np.linspace(10, 26, 50))  # +160% sharp recent move
+    out = pre_breakout.compute("X", _frame(closes))
+    assert out["available"] is True
+    assert out["state"] == "EXTENDED"
+    assert out["coiled_score"] <= 40
+
+
+def test_pre_breakout_rewards_tight_compressed_base():
+    # long flat, tightly-ranging base = compressed coil, not extended
+    rng = np.random.default_rng(1)
+    closes = list(10 + rng.normal(0, 0.04, 140))  # very tight around 10
+    out = pre_breakout.compute("X", _frame(closes))
+    assert out["available"] is True
+    assert out["state"] in ("COILED", "BASING")
+    assert out["coiled_score"] >= 50
+    assert out["ext_pct"] is not None and abs(out["ext_pct"]) < 10  # not extended
+
+
+def test_pre_breakout_unavailable_on_short_history():
+    assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False

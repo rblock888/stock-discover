@@ -57,10 +57,24 @@ export interface RegimeTilt {
   reasons: string[];
 }
 
+export interface CoiledBlock {
+  available: boolean;
+  coiled_score: number;
+  state: "COILED" | "BASING" | "EXTENDED" | "NO SETUP" | "UNKNOWN";
+  summary?: string;
+  squeeze_pctile?: number;
+  range_pct?: number;
+  ext_pct?: number;
+  ret_3m_pct?: number;
+  pivot_prox?: number;
+  reasons?: string[];
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
   edge?: EdgeBlock;
+  coiled?: CoiledBlock;
   calibrated_p_win?: number | null;
   tilt?: RegimeTilt;
   rank_score?: number;

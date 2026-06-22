@@ -37,7 +37,8 @@ def init_db():
         # measure which buckets actually predict.
         existing = {r[1] for r in c.execute("PRAGMA table_info(scan_snapshots)").fetchall()}
         for col, decl in (("tilt_factor", "REAL"), ("regime_label", "TEXT"),
-                          ("rank_score", "REAL"), ("bucket_scores", "TEXT")):
+                          ("rank_score", "REAL"), ("bucket_scores", "TEXT"),
+                          ("coiled_score", "REAL")):
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_snapshots ADD COLUMN {col} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_date ON scan_snapshots(scan_date)")
@@ -140,12 +141,13 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 b: (bd.get(b) or {}).get("raw") for b in
                 ("fundamentals", "momentum", "catalyst", "insider", "sentiment")
             }) if bd else None
+            coiled = (stock.get("coiled") or {}).get("coiled_score")
             try:
                 c.execute("""
                     INSERT OR IGNORE INTO scan_snapshots
                     (ticker, scan_date, price, composite_score, ml_score, early_score,
-                     is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores, coiled_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     ticker,
                     scan_date,
@@ -159,6 +161,7 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                     regime_label,
                     stock.get("rank_score"),
                     bucket_scores,
+                    coiled,
                 ))
             except Exception:
                 continue
@@ -194,7 +197,7 @@ def get_snapshot_features() -> list:
     """Per-snapshot scoring features for evidence/A-B analysis (joins to returns)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT ticker, scan_date, composite_score, tilt_factor, rank_score, bucket_scores "
+            "SELECT ticker, scan_date, composite_score, tilt_factor, rank_score, bucket_scores, coiled_score "
             "FROM scan_snapshots ORDER BY scan_date ASC"
         ).fetchall()
         return [dict(r) for r in rows]

@@ -55,6 +55,7 @@ import short_squeeze
 import squeeze_discovery
 import price_history
 import ticker_edge
+import pre_breakout
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -501,6 +502,12 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Add early detection / potential score
     early = early_detection.score(ticker, bucket_scores)
     result["early_detection"] = early
+
+    # Pre-breakout / coiled-spring detector — catch them BEFORE they fly
+    try:
+        result["coiled"] = pre_breakout.compute(ticker, hist)
+    except Exception:
+        result["coiled"] = dict(pre_breakout.UNAVAILABLE)
 
     # Add competitor analysis
     comp = competitors.analyze(ticker)

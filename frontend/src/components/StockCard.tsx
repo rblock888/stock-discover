@@ -234,6 +234,24 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 Early
               </span>
             )}
+            {stock.coiled?.state === "COILED" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "color-mix(in srgb, var(--accent-cyan) 18%, transparent)", color: "var(--accent-cyan)" }}
+                title={stock.coiled.summary}
+              >
+                ⊟ Coiled
+              </span>
+            )}
+            {stock.coiled?.state === "EXTENDED" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "var(--amber-dim)", color: "var(--amber)" }}
+                title={`Already extended${stock.coiled.ret_3m_pct ? ` (+${stock.coiled.ret_3m_pct.toFixed(0)}% in 3m)` : ""} — chase risk`}
+              >
+                Extended
+              </span>
+            )}
             {stock.short_squeeze && stock.short_squeeze.score >= 60 && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"

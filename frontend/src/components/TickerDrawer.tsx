@@ -116,6 +116,48 @@ function GaugeBlock({ name, gauge }: { name: string; gauge?: EdgeGauge }) {
   );
 }
 
+const COILED_COLOR: Record<string, string> = {
+  COILED: "var(--accent-cyan)",
+  BASING: "var(--green-bright)",
+  EXTENDED: "var(--amber)",
+  "NO SETUP": "var(--text-muted)",
+};
+
+function CoiledBlockView({ c }: { c: NonNullable<StockResult["coiled"]> }) {
+  const color = COILED_COLOR[c.state] ?? "var(--text-muted)";
+  return (
+    <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.025)", border: `1px solid ${color}30` }}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[14px] font-bold tracking-[0.04em]" style={{ color }}>{c.state}</span>
+        <span className="text-[13px] font-bold tabular-nums" style={{ fontFamily: "var(--font-mono)", color }}>{c.coiled_score.toFixed(0)}<span className="text-[9px]" style={{ color: "var(--text-muted)" }}>/100</span></span>
+      </div>
+      <div className="text-[10px] mb-2" style={{ color: "var(--text-secondary)" }}>{c.summary}</div>
+      <div className="grid grid-cols-4 gap-2 mb-2">
+        <Metric label="compress" value={c.squeeze_pctile != null ? `${c.squeeze_pctile}%ile` : "—"} />
+        <Metric label="base" value={c.range_pct != null ? `${c.range_pct.toFixed(0)}%` : "—"} />
+        <Metric label="vs 50MA" value={c.ext_pct != null ? `${c.ext_pct >= 0 ? "+" : ""}${c.ext_pct.toFixed(0)}%` : "—"} />
+        <Metric label="3m move" value={c.ret_3m_pct != null ? `${c.ret_3m_pct >= 0 ? "+" : ""}${c.ret_3m_pct.toFixed(0)}%` : "—"} />
+      </div>
+      {c.reasons && c.reasons.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {c.reasons.map((r, i) => (
+            <span key={i} className="text-[9px] px-1.5 py-[2px] rounded" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color }}>{r}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="text-center">
+      <div className="text-[12px] font-bold tabular-nums leading-none" style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{value}</div>
+      <div className="text-[8px] uppercase tracking-[0.04em] mt-1" style={{ color: "var(--text-muted)" }}>{label}</div>
+    </div>
+  );
+}
+
 function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div>
@@ -234,6 +276,12 @@ export function TickerDrawer() {
                 { points: hist.points.map((p) => p.composite), color: "var(--accent-bright)" },
                 { points: hist.points.map((p) => p.ml_score), color: "#ec4899", dashed: true },
               ]} />
+            </Section>
+          )}
+
+          {stock.coiled?.available && (
+            <Section title="Pre-breakout setup">
+              <CoiledBlockView c={stock.coiled} />
             </Section>
           )}
 

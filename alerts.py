@@ -42,31 +42,68 @@ def _send(text: str, parse_mode: str = "Markdown") -> bool:
 
 
 def _format_stock(stock: dict) -> str:
-    """Format a stock for telegram message."""
+    """Format a stock for telegram — honest, measured signals only (matches UI)."""
     ticker = stock.get("ticker", "?")
-    price = stock.get("quote", {}).get("price", 0) if stock.get("quote") else 0
-    change = stock.get("quote", {}).get("change_pct", 0) if stock.get("quote") else 0
-    name = stock.get("quote", {}).get("name", ticker) if stock.get("quote") else ticker
+    q = stock.get("quote") or {}
+    price = q.get("price", 0)
+    change = q.get("change_pct", 0)
+    name = q.get("name", ticker)
     composite = stock.get("composite", 0)
-    ml_score = stock.get("ml_score", 0)
-    early = stock.get("early_detection", {}).get("score", 0) if stock.get("early_detection") else 0
-    breakout = stock.get("breakout", {})
+    cpw = stock.get("calibrated_p_win")
+    edge = stock.get("edge") or {}
+    tilt = stock.get("tilt") or {}
+    sq = stock.get("short_squeeze") or {}
 
     lines = [f"*${ticker}* — {name}"]
     if price:
         change_str = f" ({change:+.1f}%)" if change else ""
         lines.append(f"💵 ${price:.2f}{change_str}")
-    lines.append(f"📊 Score *{composite:.0f}*  · AI *{ml_score:.0f}*  · Early *{early:.0f}*")
 
-    if breakout and breakout.get("score", 0) > 50:
-        lines.append(f"🎯 Breakout: *{breakout['score']:.0f}%* prob, +{breakout.get('expected_return_pct', 0):.0f}% exp")
+    # Composite + the MEASURED win-rate (calibrated), not the fabricated "AI %"
+    score_line = f"📊 Composite *{composite:.0f}*"
+    if cpw is not None:
+        score_line += f"  · Measured win *{cpw * 100:.0f}%* (5d)"
+    lines.append(score_line)
 
-    pattern = stock.get("pattern_match", {})
-    if pattern and pattern.get("best_match"):
-        match = pattern.get("matches", [{}])[0]
-        lines.append(f"🔮 Like {pattern['best_match']} (+{match.get('move_pct')}%)")
+    # Plain-language regime gauges
+    flow = (edge.get("flow") or {}).get("state")
+    bearing = (edge.get("bearing") or {}).get("state")
+    pulse = (edge.get("pulse") or {}).get("state")
+    if flow and bearing and pulse:
+        lines.append(f"⚙️ {bearing} · {flow} flow · {pulse} vol")
+
+    # Regime tilt (why it ranks where it does)
+    factor = tilt.get("factor", 1.0)
+    if abs(factor - 1) >= 0.04:
+        sign = "+" if factor >= 1 else "−"
+        reason = (tilt.get("reasons") or [""])[0].lstrip("+− ")
+        lines.append(f"🌐 Regime {sign}{abs((factor - 1) * 100):.0f}%{f' ({reason})' if reason else ''}")
+
+    if (sq.get("score") or 0) >= 60:
+        lines.append(f"🔥 Squeeze {sq['score']:.0f} · {sq.get('short_pct_float', 0):.0f}% SI · {sq.get('days_to_cover', 0):.0f}d cover")
 
     return "\n".join(lines)
+
+
+def _is_high_conviction(stock: dict) -> bool:
+    """Alert-worthy = MEASURED conviction in a supportive regime.
+
+    Gates on the calibrated hit-rate (or top-tier composite before calibration
+    is ready), and refuses downtrends / thin tape. Deliberately does NOT use
+    ml_score — it has no measured edge.
+    """
+    edge = stock.get("edge") or {}
+    bearing = (edge.get("bearing") or {}).get("state")
+    flow = (edge.get("flow") or {}).get("state")
+    if bearing in ("DOWN", "CHOPPY DOWN") or flow == "THIN":
+        return False
+    if (stock.get("tilt") or {}).get("factor", 1.0) < 1.0:
+        return False  # regime is leaning against it
+
+    cpw = stock.get("calibrated_p_win")
+    if cpw is not None:
+        return cpw >= 0.30  # measurably above the ~0.22 base rate
+    return stock.get("composite", 0) >= 68  # fallback until calibration is ready
 
 
 def alert_new_pick(stock: dict, alert_type: str = "ai_pick") -> bool:
@@ -80,9 +117,9 @@ def alert_new_pick(stock: dict, alert_type: str = "ai_pick") -> bool:
         return False
 
     if alert_type == "new_alert":
-        header = "🚨 *NEW MULTI-SIGNAL ALERT*"
-    elif alert_type == "ai_pick":
-        header = "✨ *NEW AI TOP PICK*"
+        header = "🚨 *MULTI-SIGNAL ALERT*"
+    elif alert_type == "high_conviction":
+        header = "🎯 *HIGH-CONVICTION SETUP*"
     elif alert_type == "improving":
         header = "📈 *SCORE IMPROVING*"
     else:
@@ -136,14 +173,13 @@ def process_scan_results(ranked_stocks: list, ai_picks: list = None):
     if not is_configured():
         return
 
-    ai_set = set(ai_picks or [])
-
-    # Alert top 3 AI picks
-    for stock in ranked_stocks[:5]:
-        if stock.get("multi_signal_alert"):
-            alert_new_pick(stock, "new_alert")
-        elif stock.get("ticker") in ai_set and stock.get("ml_score", 0) >= 65:
-            alert_new_pick(stock, "ai_pick")
+    # Alert measured high-conviction setups from the top of the ranking.
+    # (No longer gates on ml_score — it has no measured edge.)
+    for stock in ranked_stocks[:8]:
+        if not _is_high_conviction(stock):
+            continue
+        atype = "new_alert" if stock.get("multi_signal_alert") else "high_conviction"
+        alert_new_pick(stock, atype)
 
     # Check watchlist for big moves
     watchlist = db.get_watchlist()

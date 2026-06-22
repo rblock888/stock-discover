@@ -165,14 +165,27 @@ export function TickerDrawer() {
   const comp = stock.competitors;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "rgba(3,6,18,0.55)", backdropFilter: "blur(2px)" }} onClick={close}>
+    <div
+      className="fixed inset-0 z-50 flex justify-end"
+      style={{ background: "rgba(2,5,14,0.72)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)" }}
+      onClick={close}
+    >
       <div
-        className="glass-strong h-full overflow-y-auto"
-        style={{ width: "min(460px, 92vw)", borderRadius: "20px 0 0 20px" }}
+        className="h-full overflow-y-auto glow-top"
+        style={{
+          width: "min(460px, 92vw)",
+          borderRadius: "20px 0 0 20px",
+          // Dashboard's navy gradient — opaque, so content is readable (was translucent glass)
+          background:
+            "radial-gradient(120% 55% at 50% 0%, rgba(109,93,252,0.16), transparent 60%), " +
+            "linear-gradient(165deg, #141c38 0%, #0b1124 55%, #0d1226 100%)",
+          borderLeft: "1px solid var(--glass-border-strong)",
+          boxShadow: "-26px 0 64px rgba(2,6,20,0.6)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="sticky top-0 z-10 px-5 pt-4 pb-3" style={{ background: "var(--glass-bg-strong)", backdropFilter: "blur(22px)", borderBottom: "1px solid var(--border)" }}>
+        {/* Header — opaque so scrolling content doesn't bleed through */}
+        <div className="sticky top-0 z-10 px-5 pt-4 pb-3" style={{ background: "linear-gradient(180deg, #161e3c, #121a36)", borderBottom: "1px solid var(--glass-border-strong)" }}>
           <div className="flex items-start gap-3">
             <TickerLogo ticker={stock.ticker} size={40} />
             <div className="flex-1 min-w-0">

@@ -52,10 +52,18 @@ export interface EdgeBlock {
   pulse?: EdgeGauge;
 }
 
+export interface RegimeTilt {
+  factor: number;
+  reasons: string[];
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
   edge?: EdgeBlock;
+  calibrated_p_win?: number | null;
+  tilt?: RegimeTilt;
+  rank_score?: number;
   breakdown: {
     fundamentals: BucketScore;
     momentum: BucketScore;
@@ -519,4 +527,70 @@ export interface HistoryResponse {
 
 export async function getHistory(ticker: string): Promise<HistoryResponse> {
   return fetcher(`/api/history/${ticker}`);
+}
+
+// ─── Model Scorecard (closed-loop evaluation) ───
+
+export interface ScoreDecile {
+  bin: number;
+  score_lo: number;
+  score_hi: number;
+  n: number;
+  avg_return_pct: number;
+  avg_excess_pct: number | null;
+  win_rate: number;
+  beat_spy_rate: number | null;
+}
+
+export interface SignalCard {
+  ic: number;
+  ic_excess: number | null;
+  n: number;
+  deciles: ScoreDecile[];
+  top_minus_bottom_pct: number;
+  top_win_rate: number;
+  bottom_win_rate: number;
+}
+
+export interface Scorecard {
+  available: boolean;
+  horizon: number;
+  n: number;
+  overall_avg_return_pct?: number;
+  overall_win_rate?: number;
+  overall_beat_spy_rate?: number | null;
+  signals?: Record<string, SignalCard>;
+  detail?: string;
+}
+
+export interface CalibrationCurve {
+  available: boolean;
+  signal?: string;
+  horizon?: number;
+  win_threshold?: number;
+  n?: number;
+  base_rate?: number;
+  curve?: { score: number; p_win: number; n: number }[];
+}
+
+export interface DataStatus {
+  tickers_scored: number;
+  tickers_with_price_history: number;
+  junk_tickers: number;
+  trading_days_deep: number;
+  first_day: string | null;
+  last_day: string | null;
+  resolved_by_horizon: Record<string, number>;
+  horizons: number[];
+}
+
+export interface ScorecardResponse {
+  scorecards: Record<string, Scorecard> | null;
+  data_status: DataStatus;
+  last_run: string | null;
+  calibration: Record<string, CalibrationCurve>;
+}
+
+export async function getScorecard(): Promise<ScorecardResponse> {
+  return fetcher("/api/scorecard");
 }

@@ -18,6 +18,7 @@ import { BacktestPanel } from "@/components/BacktestPanel";
 import { ManualLookup } from "@/components/ManualLookup";
 import { PhotonicsCycle } from "@/components/PhotonicsCycle";
 import { Overview } from "@/components/Overview";
+import { ScorecardPanel } from "@/components/Scorecard";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -529,8 +530,10 @@ function Sidebar({
       className="flex flex-col shrink-0"
       style={{
         width: 168,
-        backgroundColor: "var(--bg-surface)",
-        borderRight: "1px solid var(--border)",
+        background: "linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.015))",
+        backdropFilter: "blur(20px) saturate(1.3)",
+        WebkitBackdropFilter: "blur(20px) saturate(1.3)",
+        borderRight: "1px solid var(--glass-border)",
         height: "100vh",
         position: "sticky",
         top: 0,
@@ -683,10 +686,7 @@ export default function Home() {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <div
-            className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin"
-            style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
-          />
+          <div className="w-8 h-8 border-2 border-[var(--accent-bright)] border-t-transparent rounded-full animate-spin" />
           <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>
             {data?.scan_in_progress ? "Running scan…" : "Connecting…"}
           </p>
@@ -732,7 +732,7 @@ export default function Home() {
       />
 
       {/* Main content — scrollable */}
-      <div className="flex-1 overflow-y-auto" style={{ backgroundColor: "var(--bg-primary)" }}>
+      <div className="flex-1 overflow-y-auto" style={{ backgroundColor: "transparent" }}>
         {/* New-ticker banner */}
         {data?.new_tickers && data.new_tickers.length > 0 && (
           <div
@@ -771,6 +771,7 @@ export default function Home() {
 
         {tab === "tools" && (
           <div className="p-5 max-w-[1200px] space-y-5">
+            <ScorecardPanel />
             <ManualLookup />
             <BacktestPanel />
           </div>

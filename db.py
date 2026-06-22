@@ -31,6 +31,11 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON scan_snapshots(ticker)")
+        # Migration: regime-tilt columns (added 2026-06; ignore if already present)
+        existing = {r[1] for r in c.execute("PRAGMA table_info(scan_snapshots)").fetchall()}
+        for col, decl in (("tilt_factor", "REAL"), ("regime_label", "TEXT"), ("rank_score", "REAL")):
+            if col not in existing:
+                c.execute(f"ALTER TABLE scan_snapshots ADD COLUMN {col} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_date ON scan_snapshots(scan_date)")
 
         # User watchlist
@@ -57,6 +62,25 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts_sent(ticker, alert_type)")
+
+        # Realized forward returns per snapshot (the closed loop for calibration)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS snapshot_returns (
+                ticker TEXT NOT NULL,
+                snap_day TEXT NOT NULL,
+                horizon INTEGER NOT NULL,
+                entry_price REAL,
+                exit_price REAL,
+                fwd_return REAL,
+                spy_return REAL,
+                excess_return REAL,
+                composite_score REAL,
+                ml_score REAL,
+                computed_at TEXT,
+                UNIQUE(ticker, snap_day, horizon)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_sret_horizon ON snapshot_returns(horizon)")
 
         # Daily market-regime snapshots (last write of the day wins)
         c.execute("""
@@ -90,7 +114,8 @@ def get_conn():
 # Snapshots (for backtesting)
 # ────────────────────────────────────────────
 
-def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = None):
+def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = None,
+                  regime_label: str = None):
     """Save current ranked picks as a snapshot for later backtesting."""
     if not ranked_stocks:
         return
@@ -104,11 +129,13 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
             if not ticker:
                 continue
             price = stock.get("quote", {}).get("price", 0) if stock.get("quote") else 0
+            tilt = (stock.get("tilt") or {}).get("factor")
             try:
                 c.execute("""
                     INSERT OR IGNORE INTO scan_snapshots
-                    (ticker, scan_date, price, composite_score, ml_score, early_score, is_alert, is_ai_pick)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (ticker, scan_date, price, composite_score, ml_score, early_score,
+                     is_alert, is_ai_pick, tilt_factor, regime_label, rank_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     ticker,
                     scan_date,
@@ -118,6 +145,9 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                     stock.get("early_detection", {}).get("score", 0) if stock.get("early_detection") else 0,
                     1 if stock.get("multi_signal_alert") else 0,
                     1 if ticker in ai_set else 0,
+                    tilt,
+                    regime_label,
+                    stock.get("rank_score"),
                 ))
             except Exception:
                 continue
@@ -136,6 +166,44 @@ def get_snapshots(ticker: str = None, days_back: int = 90) -> list:
             rows = conn.execute(
                 "SELECT * FROM scan_snapshots ORDER BY scan_date DESC LIMIT 500"
             ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_snapshots() -> list:
+    """Every snapshot ever recorded (no LIMIT) — for forward-return evaluation."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ticker, scan_date, price, composite_score, ml_score, early_score, "
+            "is_alert, is_ai_pick FROM scan_snapshots ORDER BY scan_date ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_snapshot_returns(rows: list):
+    """Bulk-upsert realized forward returns keyed by (ticker, snap_day, horizon)."""
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT OR REPLACE INTO snapshot_returns
+            (ticker, snap_day, horizon, entry_price, exit_price, fwd_return,
+             spy_return, excess_return, composite_score, ml_score, computed_at)
+            VALUES (:ticker, :snap_day, :horizon, :entry_price, :exit_price, :fwd_return,
+                    :spy_return, :excess_return, :composite_score, :ml_score, :computed_at)
+        """, rows)
+        conn.commit()
+
+
+def get_snapshot_returns(horizon: int = None) -> list:
+    """Resolved forward returns, optionally filtered to one horizon."""
+    with get_conn() as conn:
+        if horizon is not None:
+            rows = conn.execute(
+                "SELECT * FROM snapshot_returns WHERE horizon = ? ORDER BY snap_day ASC",
+                (horizon,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM snapshot_returns ORDER BY snap_day ASC").fetchall()
         return [dict(r) for r in rows]
 
 

@@ -57,6 +57,8 @@ import price_history
 import ticker_edge
 import market_regime
 import brief as brief_composer
+import evaluation
+import regime_tilt
 
 # Initialize database
 db.init_db()
@@ -147,10 +149,17 @@ def _run_full_pipeline():
             except Exception as e:
                 logger.error(f"  Failed {ticker}: {e}")
 
-        # Step 3: Rank
-        ranked = sorted(results.items(), key=lambda x: x[1]["composite"], reverse=True)
-        alerts = [t for t, r in ranked if r["multi_signal_alert"]]
-        ranked_list = [{"ticker": t, **r} for t, r in ranked]
+        # Step 3: Rank — composite tilted by the current regime (bounded, logged).
+        # composite is untouched; rank_score = composite × tilt drives ordering.
+        regime_now = market_regime.get_cached()
+        regime_label = (regime_now.get("mood") or {}).get("label") if regime_now.get("available") else None
+        ranked_list = [{"ticker": t, **r} for t, r in results.items()]
+        for r in ranked_list:
+            tilt = regime_tilt.compute_tilt(r, regime_now)
+            r["tilt"] = tilt
+            r["rank_score"] = round(r["composite"] * tilt["factor"], 1)
+        ranked_list.sort(key=lambda x: x["rank_score"], reverse=True)
+        alerts = [r["ticker"] for r in ranked_list if r["multi_signal_alert"]]
 
         # Step 4: Detect new tickers vs previous scan
         new_tickers = []
@@ -201,7 +210,7 @@ def _run_full_pipeline():
         # ─── Persist snapshots for backtesting ───
         try:
             ai_picks = [s["ticker"] for s in sorted(ranked_list, key=lambda x: x.get("ml_score", 0), reverse=True)[:3]]
-            db.save_snapshot(ranked_list, scan_date=cache["last_scan"], ai_picks=ai_picks)
+            db.save_snapshot(ranked_list, scan_date=cache["last_scan"], ai_picks=ai_picks, regime_label=regime_label)
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
@@ -305,6 +314,21 @@ def _run_secondary_pipelines():
     loop.run_in_executor(pool, _run_squeeze_pipeline)
 
 
+_eval_state = {"last": 0.0}
+EVAL_INTERVAL = 6 * 3600  # forward-return backfill is heavy (~200 fetches); every 6h
+
+
+def _run_evaluation_pipeline(force: bool = False):
+    """Backfill realized forward returns + recompute scorecard/calibration."""
+    if not force and time.time() - _eval_state["last"] < EVAL_INTERVAL:
+        return
+    _eval_state["last"] = time.time()
+    try:
+        evaluation.refresh()
+    except Exception as e:
+        logger.error(f"Evaluation pipeline failed: {e}")
+
+
 async def _secondary_loop():
     """Keep AXT / photonics / squeeze scans fresh on the same cadence as the main scan.
 
@@ -315,6 +339,7 @@ async def _secondary_loop():
         await asyncio.sleep(SCAN_INTERVAL)
         try:
             _run_secondary_pipelines()
+            asyncio.get_event_loop().run_in_executor(pool, _run_evaluation_pipeline, False)
         except Exception as e:
             logger.error(f"Secondary scan error: {e}")
 
@@ -332,6 +357,9 @@ async def _background_scanner():
     # do NOT wrap in asyncio.create_task (it requires a coroutine and raises).
     _run_secondary_pipelines()
     asyncio.create_task(_secondary_loop())
+
+    # Backfill forward-return evaluation once at startup (then 6h-gated in the loop)
+    loop.run_in_executor(pool, _run_evaluation_pipeline, True)
 
     # Then every SCAN_INTERVAL
     while True:
@@ -397,10 +425,13 @@ def _num(x, default=0.0) -> float:
 
 def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     """Score a single ticker across all buckets."""
+    # Per-call weights — never mutate the global config.WEIGHTS (it races
+    # across the scoring thread pool).
+    local_weights = dict(config.WEIGHTS)
     if weights:
         for k, v in weights.items():
-            if k in config.WEIGHTS:
-                config.WEIGHTS[k] = v
+            if k in local_weights:
+                local_weights[k] = v
 
     # Shared daily history — fetched once, reused by momentum + edge gauges
     hist = price_history.get_history(ticker)
@@ -417,7 +448,7 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # the ML layer, ranking sorts, and JSON serialization
     for b in bucket_scores.values():
         b["score"] = _num(b.get("score", 0))
-    result = scorer.composite_score(bucket_scores)
+    result = scorer.composite_score(bucket_scores, weights=local_weights)
 
     # Add price/market data
     try:
@@ -500,6 +531,14 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Short squeeze potential — reuse the already-fetched yfinance info
     squeeze = short_squeeze.score(ticker, bucket_scores, yf_info=yf_info)
     result["short_squeeze"] = squeeze
+
+    # Measured (calibrated) win-probability from the closed-loop evaluation,
+    # if calibration has been computed. None until enough forward data exists.
+    try:
+        p = evaluation.calibrated_p_win(result["composite"], "composite_score", 5)
+        result["calibrated_p_win"] = round(p, 3) if p is not None else None
+    except Exception:
+        result["calibrated_p_win"] = None
 
     # Trading-regime gauges (FLOW / BEARING / PULSE) from the shared history
     try:
@@ -933,6 +972,32 @@ async def refresh_market_regime():
 async def get_brief():
     """The latest composed daily brief (template or LLM-polished)."""
     return _clean({"brief": brief_cache.get("brief"), "last_scan": cache.get("last_scan")})
+
+
+@app.get("/api/scorecard")
+async def get_scorecard():
+    """Measured model scorecard: per-signal IC, decile hit-rates, calibration, coverage.
+
+    Builds from already-persisted snapshot_returns (no network) if the
+    background backfill hasn't populated the in-memory cache yet.
+    """
+    cached = evaluation.get_cached()
+    if not cached.get("scorecards"):
+        cards = {h: evaluation.scorecard(h) for h in evaluation.HORIZONS}
+        for h in evaluation.HORIZONS:
+            for sig in ("composite_score", "ml_score"):
+                evaluation.calibration(sig, h)
+        cached = evaluation.get_cached()
+        cached["scorecards"] = cards
+    return _clean(cached)
+
+
+@app.post("/api/scorecard/refresh")
+async def refresh_scorecard():
+    """Force a fresh forward-return backfill + recompute (heavy)."""
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(pool, _run_evaluation_pipeline, True)
+    return {"status": "started"}
 
 
 @app.get("/api/history/{ticker}")

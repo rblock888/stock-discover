@@ -171,13 +171,7 @@ export function StockCard({ stock }: { stock: StockResult }) {
   }
 
   return (
-    <div
-      className="rounded-lg overflow-hidden transition-all"
-      style={{
-        backgroundColor: "var(--bg-surface)",
-        border: `1px solid ${stock.multi_signal_alert ? "var(--amber)" : "var(--border)"}`,
-      }}
-    >
+    <div className={`glass glass-hover rounded-2xl overflow-hidden${stock.multi_signal_alert ? " alert-ring" : ""}`}>
       {/* ── Top: logo + ticker + composite ── */}
       <div className="flex items-center gap-3 px-4 pt-4 pb-3">
         <TickerLogo ticker={stock.ticker} size={40} />
@@ -212,6 +206,18 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 style={{ backgroundColor: "var(--amber-dim)", color: "var(--amber)" }}
               >
                 Alert
+              </span>
+            )}
+            {stock.tilt && Math.abs(stock.tilt.factor - 1) >= 0.04 && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.08em] px-1.5 py-[2px] rounded cursor-help"
+                style={{
+                  backgroundColor: stock.tilt.factor >= 1 ? "var(--green-dim)" : "var(--red-dim)",
+                  color: stock.tilt.factor >= 1 ? "var(--green)" : "var(--red)",
+                }}
+                title={`Regime tilt — ranked ${stock.tilt.factor >= 1 ? "up" : "down"} ${Math.abs((stock.tilt.factor - 1) * 100).toFixed(0)}% by current conditions:\n${stock.tilt.reasons.join("\n")}`}
+              >
+                {stock.tilt.factor >= 1 ? "▲" : "▼"} regime {stock.tilt.factor >= 1 ? "+" : "−"}{Math.abs((stock.tilt.factor - 1) * 100).toFixed(0)}%
               </span>
             )}
             {early >= 65 && (
@@ -374,26 +380,26 @@ export function StockCard({ stock }: { stock: StockResult }) {
         <div className="px-4 py-3 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>
           <div className="flex items-center gap-2">
             <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--accent)" }}>
-              AI Prediction
+              Model Signals
             </span>
-            {stock.ml_score !== undefined && (
+            {/* The honest, measured number when calibration exists */}
+            {stock.calibrated_p_win != null ? (
               <span
-                className="text-[11px] font-bold tabular-nums px-1.5 py-[1px] rounded"
-                style={{
-                  color: scoreColor(stock.ml_score),
-                  backgroundColor: stock.ml_score >= 60 ? scoreColor(stock.ml_score) + "20" : "var(--bg-primary)",
-                  fontFamily: "var(--font-mono)",
-                }}
+                className="text-[10px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+                style={{ color: "var(--green)", backgroundColor: "var(--green-dim)", fontFamily: "var(--font-mono)" }}
+                title="Measured historical hit-rate (≥+10% in 5 trading days) for stocks at this composite score"
               >
-                {stock.ml_score.toFixed(0)}
+                {(stock.calibrated_p_win * 100).toFixed(0)}% measured win
               </span>
+            ) : (
+              <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>uncalibrated</span>
             )}
           </div>
 
-          {/* Breakout probability */}
+          {/* Breakout model — relabeled: this is a heuristic score, not a probability */}
           {stock.breakout && stock.breakout.score >= 20 && (
             <div className="flex items-baseline gap-2 text-[11px]">
-              <span style={{ color: "var(--text-muted)" }}>Breakout 60d:</span>
+              <span style={{ color: "var(--text-muted)" }}>Breakout model:</span>
               <span
                 className="font-bold tabular-nums"
                 style={{
@@ -401,37 +407,29 @@ export function StockCard({ stock }: { stock: StockResult }) {
                   fontFamily: "var(--font-mono)",
                 }}
               >
-                {stock.breakout.score.toFixed(0)}% prob
+                {stock.breakout.score.toFixed(0)}/100
               </span>
-              {stock.breakout.expected_return_pct > 0 && (
-                <span style={{ color: "var(--green)" }}>
-                  +{stock.breakout.expected_return_pct}% exp
-                </span>
-              )}
               <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                ({stock.breakout.confidence} conf)
+                ({stock.breakout.confidence} conf{stock.calibrated_p_win == null ? ", uncalibrated" : ""})
               </span>
             </div>
           )}
 
-          {/* Pattern match */}
+          {/* Closest historical setup — relabeled: cosine proximity, not a calibrated match */}
           {stock.pattern_match && stock.pattern_match.best_match && stock.pattern_match.score >= 50 && (
             <div className="text-[11px]">
               <div className="flex items-center gap-1.5 mb-1">
-                <span style={{ color: "var(--text-muted)" }}>Looks like:</span>
+                <span style={{ color: "var(--text-muted)" }}>Closest setup:</span>
                 <div className="flex items-center gap-1">
                   <span className="font-bold" style={{ color: "var(--text-primary)" }}>
                     {stock.pattern_match.best_match}
                   </span>
-                  <span style={{ color: "var(--green)" }}>
-                    +{stock.pattern_match.matches[0]?.move_pct}%
-                  </span>
-                  <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                    in {stock.pattern_match.matches[0]?.move_days}d
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    (+{stock.pattern_match.matches[0]?.move_pct}% in {stock.pattern_match.matches[0]?.move_days}d)
                   </span>
                 </div>
-                <span className="text-[10px]" style={{ color: "var(--accent)" }}>
-                  {stock.pattern_match.score.toFixed(0)}% match
+                <span className="text-[10px]" style={{ color: "var(--text-muted)" }} title="Feature-vector proximity to a hand-curated historical setup — not a probability">
+                  {Math.min(99, stock.pattern_match.score).toFixed(0)} proximity
                 </span>
               </div>
               {stock.pattern_match.matches[0]?.thesis && (
@@ -445,15 +443,10 @@ export function StockCard({ stock }: { stock: StockResult }) {
           {/* Sector catch-up */}
           {stock.sector_momentum && stock.sector_momentum.score >= 30 && (
             <div className="flex items-baseline gap-2 text-[11px]">
-              <span style={{ color: "var(--text-muted)" }}>Catch-up:</span>
+              <span style={{ color: "var(--text-muted)" }}>Catch-up model:</span>
               <span className="font-bold tabular-nums" style={{ color: "var(--amber)", fontFamily: "var(--font-mono)" }}>
-                {stock.sector_momentum.score.toFixed(0)}%
+                {stock.sector_momentum.score.toFixed(0)}/100
               </span>
-              {stock.sector_momentum.expected_catch_up_pct > 0 && (
-                <span style={{ color: "var(--green)" }}>
-                  +{stock.sector_momentum.expected_catch_up_pct}% exp
-                </span>
-              )}
             </div>
           )}
 

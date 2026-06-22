@@ -27,6 +27,63 @@ def _headers():
     return {"User-Agent": "Mozilla/5.0 (StockDiscovery/1.0)"}
 
 
+# Common 2-5 letter uppercase words that are NOT tickers — text scraping (RSS,
+# Reddit, SEC filings) otherwise turns these into phantom "stocks" (the audit
+# found ~62% of scored symbols were junk like FDA / GPU / CLASS / PCAOB).
+STOPWORDS = frozenset({
+    # agencies / regulators / orgs
+    "FDA", "SEC", "FBI", "IRS", "DOJ", "FTC", "EPA", "CDC", "WHO", "FAA", "NASA",
+    "NATO", "FOMC", "ECB", "IMF", "OPEC", "PCAOB", "FINRA", "GAAP", "NCAA", "NFL",
+    "NBA", "MLB", "UN", "EU", "UK", "US", "USA", "USD", "EUR", "GBP", "JPY", "CNY",
+    # exchanges / market terms
+    "NYSE", "NASDAQ", "AMEX", "OTC", "OTCQB", "OTCQX", "TSX", "LSE", "ETF", "ETN",
+    "SPAC", "REIT", "IPO", "ADR", "NAV", "AUM",
+    # finance jargon / metrics
+    "CEO", "CFO", "COO", "CTO", "CIO", "EPS", "ROE", "ROI", "ROA", "YOY", "QOQ",
+    "GDP", "CPI", "PCE", "EBIT", "EBITDA", "ESG", "MOU", "LOI", "NDA", "SaaS",
+    "Q1", "Q2", "Q3", "Q4", "FY", "YTD", "TTM", "EOD", "PRE", "PR", "IR",
+    # tech / units / misc acronyms
+    "AI", "ML", "EV", "VR", "AR", "API", "SDK", "URL", "PDF", "USB", "GPU", "CPU",
+    "RAM", "SSD", "OS", "IOS", "APP", "WEB", "HTML", "HTTP", "HTTPS", "XML", "RSS",
+    "FAQ", "CEO", "MDMA", "GLOBE", "BLACK", "CLASS", "ALERT", "YORK", "MENA",
+    # org suffixes
+    "INC", "LLC", "LTD", "CORP", "PLC", "LP", "LLP", "CO", "AG", "SA", "NV",
+    # common English words the regex catches
+    "THE", "FOR", "AND", "ALL", "NEW", "FORM", "FROM", "WITH", "THAT", "THIS",
+    "HAVE", "BEEN", "WILL", "THEY", "WERE", "SAID", "EACH", "MAKE", "LIKE", "MORE",
+    "MOST", "OVER", "SOME", "TIME", "ONLY", "JUST", "ALSO", "INTO", "THAN", "THEN",
+    "THEM", "WHAT", "WHEN", "YOUR", "ABLE", "BACK", "CALL", "CAME", "DOWN", "EVEN",
+    "GOOD", "HERE", "HIGH", "KEEP", "KNOW", "LAST", "LONG", "MANY", "MUST", "NEXT",
+    "PART", "TAKE", "TELL", "VERY", "WANT", "WEEK", "WELL", "WENT", "YEAR", "DAYS",
+    "HAS", "HER", "HIM", "HIS", "HOW", "ITS", "MAY", "NOT", "NOW", "OLD", "SEE",
+    "WAY", "WHO", "BOY", "DID", "GET", "LET", "SAY", "SHE", "TOO", "USE", "DAD",
+    "MOM", "CAN", "OUR", "OUT", "DAY", "TWO", "ONE", "BIG", "TOP", "END", "RUN",
+})
+
+
+def _looks_like_ticker(t: str) -> bool:
+    return bool(t) and 1 < len(t) <= 5 and t.isalpha() and t.upper() not in STOPWORDS
+
+
+def _validate_with_prices(candidates: list, limit: int = 90) -> list:
+    """Ground-truth filter: keep only candidates that resolve to real price data.
+
+    One batched yfinance download — junk symbols return nothing and are dropped.
+    Bounded to the top `limit` candidates (only the top ~40 are ever scored).
+    """
+    head = candidates[:limit]
+    if not head:
+        return candidates
+    try:
+        import price_history
+        resolved = price_history.get_histories(head, period="1mo")
+        valid = [t for t in head if t in resolved and resolved[t] is not None and len(resolved[t]) > 0]
+        # Keep the validated head (order preserved) + the untouched tail
+        return valid + candidates[limit:]
+    except Exception:
+        return candidates
+
+
 # ---------------------------------------------------------------------------
 # Source 1: Yahoo Finance pre-built screens
 # ---------------------------------------------------------------------------
@@ -394,17 +451,10 @@ def _extract_tickers_from_text(text: str) -> list:
     for m in re.finditer(r'\((?:NASDAQ|NYSE|AMEX|OTC):\s*([A-Z]{1,5})\)', text):
         tickers.add(m.group(1))
     # Match standalone uppercase 2-5 letter words that look like tickers
-    # (more aggressive, filtered later)
+    # (aggressive — relies on STOPWORDS + price validation downstream)
     for m in re.finditer(r'\b([A-Z]{2,5})\b', text):
         word = m.group(1)
-        if word not in {"THE", "FOR", "AND", "ALL", "NEW", "CEO", "IPO", "ETF",
-                        "USD", "GDP", "FBI", "SEC", "INC", "LLC", "LTD", "RSS",
-                        "XML", "HTML", "HTTP", "NYSE", "AMEX", "OTC", "NASDAQ",
-                        "FORM", "FROM", "WITH", "THAT", "THIS", "HAVE", "BEEN",
-                        "WILL", "THEY", "WERE", "SAID", "EACH", "MAKE", "LIKE",
-                        "HAS", "HER", "HIM", "HIS", "HOW", "ITS", "MAY", "NOT",
-                        "NOW", "OLD", "SEE", "WAY", "WHO", "BOY", "DID", "GET",
-                        "LET", "SAY", "SHE", "TOO", "USE", "DAD", "MOM"}:
+        if word not in STOPWORDS:
             tickers.add(word)
     return list(tickers)
 
@@ -544,15 +594,18 @@ def build_universe(
     # Sort by number of sources (multi-source = more interesting)
     all_tickers.sort(key=lambda t: ticker_source_count.get(t, 0), reverse=True)
 
-    # Filter to valid-looking tickers
-    all_tickers = [
-        t for t in all_tickers
-        if 1 < len(t) <= 5 and t.isalpha() and t not in {"THE", "FOR", "AND", "ALL", "NEW", "CEO", "IPO", "ETF", "USD", "GDP", "FBI", "SEC"}
-    ]
+    # Filter to valid-looking tickers (format + comprehensive stoplist)
+    pre = len(all_tickers)
+    all_tickers = [t for t in all_tickers if _looks_like_ticker(t)]
+
+    # Ground-truth validation: drop anything that doesn't resolve to real price
+    # data (one batched fetch over the top candidates that would actually score).
+    all_tickers = _validate_with_prices(all_tickers, limit=90)
 
     return {
         "tickers": all_tickers,
         "sources": sources,
         "source_counts": ticker_source_count,
         "total": len(all_tickers),
+        "dropped_invalid": pre - len(all_tickers),
     }

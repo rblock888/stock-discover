@@ -1000,6 +1000,24 @@ async def refresh_scorecard():
     return {"status": "started"}
 
 
+@app.get("/api/price-history/{ticker}")
+async def get_price_history(ticker: str, period: str = "6mo"):
+    """Daily closes for the deep-dive price chart (via the shared TTL cache)."""
+    def _load():
+        hist = price_history.get_history(ticker.upper(), period=period)
+        if hist is None or hist.empty:
+            return {"ticker": ticker.upper(), "points": []}
+        pts = [
+            {"date": d.strftime("%Y-%m-%d"), "close": round(float(c), 4)}
+            for d, c in zip(hist.index, hist["Close"].to_numpy())
+            if math.isfinite(float(c))
+        ]
+        return {"ticker": ticker.upper(), "points": pts}
+
+    loop = asyncio.get_event_loop()
+    return _clean(await loop.run_in_executor(pool, _load))
+
+
 @app.get("/api/history/{ticker}")
 async def get_score_history(ticker: str):
     """Score history for sparklines, from scan snapshots (ascending)."""

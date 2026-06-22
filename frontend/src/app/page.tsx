@@ -19,6 +19,7 @@ import { ManualLookup } from "@/components/ManualLookup";
 import { PhotonicsCycle } from "@/components/PhotonicsCycle";
 import { Overview } from "@/components/Overview";
 import { ScorecardPanel } from "@/components/Scorecard";
+import { TickerDrawer } from "@/components/TickerDrawer";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -777,6 +778,9 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* Per-ticker deep-dive drawer (opens via openTicker events) */}
+      <TickerDrawer />
     </div>
   );
 }

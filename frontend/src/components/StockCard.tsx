@@ -3,6 +3,7 @@
 import { StockResult, BucketScore, EdgeGauge, HistoryResponse, addToWatchlist, getHistory } from "@/lib/api";
 import { TickerLogo } from "./TickerLogo";
 import { Sparkline } from "./gauges";
+import { openTicker } from "./TickerDrawer";
 import { useEffect, useState } from "react";
 
 const BUCKETS = [
@@ -177,9 +178,14 @@ export function StockCard({ stock }: { stock: StockResult }) {
         <TickerLogo ticker={stock.ticker} size={40} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[17px] font-bold" style={{ letterSpacing: "-0.02em" }}>
+            <button
+              onClick={() => openTicker(stock)}
+              className="text-[17px] font-bold transition-colors hover:underline"
+              style={{ letterSpacing: "-0.02em", textUnderlineOffset: 3 }}
+              title="Open deep-dive"
+            >
               {stock.ticker}
-            </span>
+            </button>
             {stock.quote?.price ? (
               <span
                 className="text-[13px] font-semibold tabular-nums"

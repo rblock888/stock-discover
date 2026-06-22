@@ -529,6 +529,15 @@ export async function getHistory(ticker: string): Promise<HistoryResponse> {
   return fetcher(`/api/history/${ticker}`);
 }
 
+export interface PriceHistory {
+  ticker: string;
+  points: { date: string; close: number }[];
+}
+
+export async function getPriceHistory(ticker: string): Promise<PriceHistory> {
+  return fetcher(`/api/price-history/${ticker}`);
+}
+
 // ─── Model Scorecard (closed-loop evaluation) ───
 
 export interface ScoreDecile {

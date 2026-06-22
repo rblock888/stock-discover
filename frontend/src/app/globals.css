@@ -7,31 +7,44 @@
 @import "@fontsource/jetbrains-mono/700.css";
 
 :root {
-  /* TradingView-inspired dark palette */
-  --bg-primary: #131722;
-  --bg-surface: #1e222d;
-  --bg-surface-hover: #262b3d;
-  --bg-elevated: #2a2e39;
-  --border: #2a2e39;
-  --border-subtle: #1e222d;
+  /* ── Futuristic glass / deep-space-navy palette ── */
+  --bg-base: #060a16;
+  --bg-primary: #0a1022;          /* content area base (mostly transparent in use) */
+  --bg-surface: #111a31;          /* solid (non-glass) card */
+  --bg-surface-hover: #16203c;
+  --bg-elevated: #1b2742;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.05);
 
-  /* Text */
-  --text-primary: #d1d4dc;
-  --text-secondary: #787b86;
-  --text-muted: #4c525e;
+  /* Glass system */
+  --glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015));
+  --glass-bg-strong: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03));
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-border-strong: rgba(255, 255, 255, 0.16);
+  --glass-shadow: 0 10px 34px rgba(2, 6, 20, 0.45);
+  --glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
-  /* Semantic */
-  --green: #26a69a;
-  --green-bright: #4dd0c8;
-  --green-dim: rgba(38, 166, 154, 0.12);
-  --red: #ef5350;
-  --red-bright: #ff7675;
-  --red-dim: rgba(239, 83, 80, 0.10);
-  --amber: #ff9800;
-  --amber-dim: rgba(255, 152, 0, 0.10);
-  --accent: #2962ff;
-  --accent-bright: #5b8def;
-  --accent-dim: rgba(41, 98, 255, 0.10);
+  /* Text — cooler, brighter for glass on navy */
+  --text-primary: #eaf0ff;
+  --text-secondary: #97a3c4;
+  --text-muted: #5a6688;
+
+  /* Semantic — brightened for dark glass */
+  --green: #34d399;
+  --green-bright: #6ee7c4;
+  --green-dim: rgba(52, 211, 153, 0.14);
+  --red: #fb7185;
+  --red-bright: #ff8fa3;
+  --red-dim: rgba(251, 113, 133, 0.14);
+  --amber: #fbbf24;
+  --amber-dim: rgba(251, 191, 36, 0.14);
+
+  /* Accent — violet/purple with cyan partner (matches reference) */
+  --accent: #6d5dfc;
+  --accent-bright: #a78bfa;
+  --accent-dim: rgba(109, 93, 252, 0.16);
+  --accent-cyan: #38bdf8;
+  --accent-pink: #ec4899;
 
   /* Fonts */
   --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -39,14 +52,20 @@
 }
 
 @theme inline {
-  --color-background: var(--bg-primary);
+  --color-background: var(--bg-base);
   --color-foreground: var(--text-primary);
 }
 
 * { box-sizing: border-box; }
 
 body {
-  background: var(--bg-primary);
+  /* Layered navy gradient with violet + cyan auroras */
+  background:
+    radial-gradient(1100px 620px at 78% -12%, rgba(109, 93, 252, 0.22), transparent 58%),
+    radial-gradient(820px 520px at 6% 4%, rgba(56, 189, 248, 0.12), transparent 55%),
+    radial-gradient(760px 600px at 96% 96%, rgba(236, 72, 153, 0.08), transparent 60%),
+    linear-gradient(157deg, #0d1430 0%, #080d20 52%, #0a0f24 100%);
+  background-attachment: fixed;
   color: var(--text-primary);
   font-family: var(--font-body);
   font-size: 13px;
@@ -55,11 +74,64 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── Glass surfaces ── */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-inset);
+}
+.glass-strong {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(22px) saturate(1.4);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  border: 1px solid var(--glass-border-strong);
+  box-shadow: var(--glass-shadow), var(--glass-inset);
+}
+.glass-hover { transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease; }
+.glass-hover:hover {
+  border-color: var(--glass-border-strong);
+  box-shadow: 0 14px 40px rgba(2, 6, 20, 0.5), var(--glass-inset);
+  transform: translateY(-1px);
+}
+
+/* Multi-signal alert highlight ring for glass cards */
+.alert-ring {
+  border-color: var(--amber);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--amber) 30%, transparent), var(--glass-shadow), var(--glass-inset);
+}
+
+/* Gradient hairline glow along a card's top edge */
+.glow-top { position: relative; }
+.glow-top::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--glow-color, var(--accent-bright)), transparent);
+  opacity: 0.7;
+}
+
+/* Soft ambient glow behind an element */
+.aura { position: relative; }
+.aura::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: radial-gradient(120% 120% at 50% 0%, var(--glow-color, var(--accent-dim)), transparent 70%);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+
 /* Scrollbar — thin, subtle */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.10); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.20); }
 
 /* Score bar fill animation */
 @keyframes scoreBarFill {

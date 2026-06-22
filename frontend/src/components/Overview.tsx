@@ -46,28 +46,34 @@ const BULLET_MARKERS: Record<string, [string, string]> = {
 
 // ─── Shared chrome ────────────────────────────────────────────────────────────
 
-function Card({ title, right, children, accent }: {
+function Card({ title, right, children, accent, tint, strong }: {
   title: string;
   right?: ReactNode;
   children: ReactNode;
   accent?: string;
+  tint?: string;
+  strong?: boolean;
 }) {
   return (
     <div
-      className="rounded-lg p-4"
-      style={{
-        backgroundColor: "var(--bg-surface)",
-        border: "1px solid var(--border)",
-        borderLeft: accent ? `3px solid ${accent}` : "1px solid var(--border)",
-      }}
+      className={`${strong ? "glass-strong" : "glass"} glass-hover glow-top rounded-2xl p-4 relative overflow-hidden`}
+      style={{ ["--glow-color" as string]: accent ?? "var(--accent-bright)" }}
     >
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--text-muted)" }}>
-          {title}
-        </span>
-        {right}
+      {tint && (
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{ background: `radial-gradient(95% 80% at 50% 0%, ${tint}, transparent 72%)` }}
+        />
+      )}
+      <div className="relative">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-[9px] uppercase tracking-[0.14em] font-bold" style={{ color: "var(--text-secondary)" }}>
+            {title}
+          </span>
+          {right}
+        </div>
+        {children}
       </div>
-      {children}
     </div>
   );
 }
@@ -108,6 +114,8 @@ function MoodCard({ regime }: { regime: MarketRegimeResponse | null }) {
   return (
     <Card
       title="Market Mood"
+      accent={color}
+      tint={`color-mix(in srgb, ${color} 18%, transparent)`}
       right={regime?.stale ? <StaleBadge asOf={regime.as_of} /> : undefined}
     >
       {mood ? (
@@ -142,7 +150,7 @@ function VolatilityCard({ regime }: { regime: MarketRegimeResponse | null }) {
   const pos = vol ? ((vol.vix - 10) / 25) * 100 : 0; // VIX 10–35 mapped onto the track
   const active = vol?.state === "QUIET" ? 0 : vol?.state === "WILD" ? 2 : 1;
   return (
-    <Card title="Volatility">
+    <Card title="Volatility" accent="var(--accent-cyan)" tint="color-mix(in srgb, var(--accent-cyan) 16%, transparent)">
       {vol ? (
         <div>
           <div className="flex items-baseline gap-2 mb-3">
@@ -175,7 +183,7 @@ function SmallcapCard({ regime }: { regime: MarketRegimeResponse | null }) {
   const sc = regime?.available ? regime.smallcap : undefined;
   const color = sc ? SMALL_COLORS[sc.state] : "var(--text-muted)";
   return (
-    <Card title="Small-Cap Appetite">
+    <Card title="Small-Cap Appetite" accent={color} tint={`color-mix(in srgb, ${color} 16%, transparent)`}>
       {sc && sc.rel_1m_pct != null ? (
         <div>
           <div className="flex items-baseline justify-between mb-3">
@@ -206,7 +214,7 @@ function BreadthCard({ regime, data }: { regime: MarketRegimeResponse | null; da
   const secPct = regime?.available ? regime.breadth?.sectors_pct : undefined;
   const colorOf = (p: number) => (p >= 60 ? "var(--green)" : p >= 40 ? "var(--amber)" : "var(--red)");
   return (
-    <Card title="Breadth">
+    <Card title="Breadth" accent="var(--accent-bright)" tint="color-mix(in srgb, var(--accent-bright) 15%, transparent)">
       {uniPct != null || secPct != null ? (
         <div className="space-y-3.5">
           {uniPct != null && (
@@ -255,7 +263,7 @@ function StaleBadge({ asOf }: { asOf?: string }) {
 function BriefCard({ brief }: { brief: Brief | null }) {
   if (!brief) {
     return (
-      <Card title="Daily Brief" accent="var(--accent)">
+      <Card title="Daily Brief" strong accent="var(--accent)" tint="color-mix(in srgb, var(--accent) 16%, transparent)">
         <Placeholder text="The brief composes after the first scan completes" />
       </Card>
     );
@@ -263,7 +271,9 @@ function BriefCard({ brief }: { brief: Brief | null }) {
   return (
     <Card
       title="Daily Brief"
+      strong
       accent="var(--accent)"
+      tint="color-mix(in srgb, var(--accent) 16%, transparent)"
       right={
         <span className="flex items-center gap-2">
           {brief.source === "llm" && (
@@ -331,7 +341,7 @@ function WhatChanged({ data, squeeze, onNavigate }: {
   const empty = !newTickers.length && !improving.length && !decaying.length && !squeeze.length;
 
   return (
-    <div className="rounded-lg p-4" style={{ backgroundColor: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+    <div className="glass glow-top rounded-2xl p-4" style={{ ["--glow-color" as string]: "var(--accent-bright)" }}>
       <div className="flex items-center justify-between mb-3">
         <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--text-muted)" }}>
           What Changed
@@ -421,7 +431,7 @@ function SectorHeatPanel({ sectors }: { sectors: SectorHeat[] }) {
   const valid = sectors.filter((s) => s.ret_1m_pct != null);
   if (!valid.length) {
     return (
-      <div className="rounded-lg p-4" style={{ backgroundColor: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+      <div className="glass glow-top rounded-2xl p-4" style={{ ["--glow-color" as string]: "var(--accent-bright)" }}>
         <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--text-muted)" }}>Sector Heat</span>
         <Placeholder />
       </div>
@@ -429,7 +439,7 @@ function SectorHeatPanel({ sectors }: { sectors: SectorHeat[] }) {
   }
   const maxAbs = Math.max(...valid.map((s) => Math.abs(s.ret_1m_pct!)), 1);
   return (
-    <div className="rounded-lg p-4" style={{ backgroundColor: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+    <div className="glass glow-top rounded-2xl p-4" style={{ ["--glow-color" as string]: "var(--accent-bright)" }}>
       <div className="flex items-center justify-between mb-3">
         <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--text-muted)" }}>
           Sector Heat
@@ -495,7 +505,7 @@ function PositionHealth({ items, ranked }: { items: WatchlistItem[]; ranked: Sto
   return (
     <div>
       <SectionHeader label="Position Health" color="var(--amber)" count={items.length} />
-      <div className="rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
+      <div className="glass rounded-2xl overflow-hidden">
         {items.map((item, i) => {
           const price = item.current_price || item.quote?.price || 0;
           const r = ranked.find((x) => x.ticker === item.ticker);
@@ -517,8 +527,8 @@ function PositionHealth({ items, ranked }: { items: WatchlistItem[]; ranked: Sto
               key={item.ticker}
               className="flex items-center gap-3 px-3 py-2.5"
               style={{
-                backgroundColor: "var(--bg-surface)",
-                borderTop: i > 0 ? "1px solid var(--border)" : "none",
+                backgroundColor: i % 2 === 1 ? "rgba(255,255,255,0.02)" : "transparent",
+                borderTop: i > 0 ? "1px solid var(--border-subtle)" : "none",
               }}
             >
               <TickerLogo ticker={item.ticker} size={22} />

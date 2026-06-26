@@ -23,6 +23,7 @@ from ticker_edge import _percentile_of_last, _piecewise
 UNAVAILABLE = {"available": False, "state": "UNKNOWN", "coiled_score": 0}
 
 COILED_SUMMARY = {
+    "BREAKING": "Breaking out of its base on volume — the spring is releasing now",
     "COILED": "Compressed and basing — loaded for a breakout, hasn't moved yet",
     "BASING": "Building a base — setup forming but not fully coiled",
     "EXTENDED": "Already extended — the move largely happened (chase risk)",
@@ -112,12 +113,28 @@ def compute(ticker: str, hist) -> dict:
         coiled = (0.35 * compression + 0.20 * tight + 0.20 * not_extended
                   + 0.15 * vol_score + 0.10 * pivot)
 
+        # Breakout trigger — the spring RELEASING: was basing, now clears the
+        # base pivot on a volume surge, and the move is still fresh.
+        base_hi = float(np.max(highs[-55:-5])) if len(highs) >= 56 else float(np.max(highs[:-5]))
+        base_lo = float(np.min(lows[-55:-5])) if len(lows) >= 56 else float(np.min(lows[:-5]))
+        base_was_tight = ((base_hi - base_lo) / c) < 0.45 if c > 0 else False
+        rvol_surge = 0.0
+        for k in (1, 2, 3):
+            denom = np.mean(volumes[-20 - k:-k]) if len(volumes) > 20 + k else 0
+            if denom > 0:
+                rvol_surge = max(rvol_surge, float(volumes[-k] / denom))
+        breaking = (c > base_hi and c <= base_hi * 1.20 and base_was_tight
+                    and rvol_surge > 1.8 and ext < 0.40 and not blowoff)
+
         # Downtrend guard: a falling, below-50MA chart is not a base
         downtrend = c < ma50 and ma20 < ma50 and ret_1m < -0.05
 
-        if blowoff or ext > 0.35:
+        if blowoff or ext > 0.40:
             state = "EXTENDED"
             coiled = min(coiled, 32)
+        elif breaking:
+            state = "BREAKING"
+            coiled = max(coiled, 74)  # urgent — surfaces at the top of the lane
         elif downtrend:
             state = "NO SETUP"
             coiled = min(coiled, 38)
@@ -129,6 +146,8 @@ def compute(ticker: str, hist) -> dict:
             state = "NO SETUP"
 
         reasons = []
+        if state == "BREAKING":
+            reasons.append(f"clearing base pivot on {rvol_surge:.1f}x volume")
         if squeeze_pctile < 35:
             reasons.append(f"volatility compressed ({squeeze_pctile:.0f}th pctile)")
         if rng20 < 20:

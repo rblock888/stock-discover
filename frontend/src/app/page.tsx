@@ -60,9 +60,9 @@ function buildSegments(stocks: StockResult[]): Segment[] {
   take(
     "coiled",
     "Coiled Springs",
-    "Compressed · basing · NOT yet moved — pre-breakout setups (the opposite of chasing)",
+    "Breaking out · coiled · basing — caught before/at the launch (the opposite of chasing)",
     "var(--accent-cyan)",
-    (s) => ["COILED", "BASING"].includes(s.coiled?.state ?? "") && (s.coiled?.coiled_score ?? 0) >= 55,
+    (s) => ["BREAKING", "COILED", "BASING"].includes(s.coiled?.state ?? "") && (s.coiled?.coiled_score ?? 0) >= 55,
     (a, b) => (b.coiled?.coiled_score ?? 0) - (a.coiled?.coiled_score ?? 0),
   );
 

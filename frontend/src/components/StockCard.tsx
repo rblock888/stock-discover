@@ -234,6 +234,15 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 Early
               </span>
             )}
+            {stock.coiled?.state === "BREAKING" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "var(--green-dim)", color: "var(--green-bright)", boxShadow: "0 0 10px color-mix(in srgb, var(--green-bright) 45%, transparent)" }}
+                title={stock.coiled.summary}
+              >
+                ⚡ Breakout
+              </span>
+            )}
             {stock.coiled?.state === "COILED" && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"

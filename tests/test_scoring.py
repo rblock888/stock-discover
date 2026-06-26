@@ -255,3 +255,19 @@ def test_pre_breakout_rewards_tight_compressed_base():
 
 def test_pre_breakout_unavailable_on_short_history():
     assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False
+
+
+def test_pre_breakout_detects_breakout_on_volume():
+    # ~120d tight base near 10, then a fresh pop above the pivot on heavy volume
+    n = 124
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    base = list(10 + np.random.default_rng(2).normal(0, 0.08, n - 3))  # tight base
+    closes = np.array(base + [10.6, 11.0, 11.4])  # clears base on last 3 days
+    highs = closes * 1.01
+    lows = closes * 0.99
+    vol = np.full(n, 1_000_000.0)
+    vol[-3:] = 3_000_000.0  # volume surge on the breakout
+    f = pd.DataFrame({"Open": closes, "High": highs, "Low": lows, "Close": closes, "Volume": vol}, index=idx)
+    out = pre_breakout.compute("X", f)
+    assert out["available"] is True
+    assert out["state"] == "BREAKING"

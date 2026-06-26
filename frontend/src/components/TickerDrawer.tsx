@@ -117,8 +117,9 @@ function GaugeBlock({ name, gauge }: { name: string; gauge?: EdgeGauge }) {
 }
 
 const COILED_COLOR: Record<string, string> = {
+  BREAKING: "var(--green-bright)",
   COILED: "var(--accent-cyan)",
-  BASING: "var(--green-bright)",
+  BASING: "var(--green)",
   EXTENDED: "var(--amber)",
   "NO SETUP": "var(--text-muted)",
 };

@@ -132,6 +132,28 @@ def alert_new_pick(stock: dict, alert_type: str = "ai_pick") -> bool:
     return False
 
 
+def alert_coiled(stock: dict, kind: str) -> bool:
+    """Alert on a fresh pre-breakout setup: a loaded coil or a breakout trigger."""
+    ticker = stock.get("ticker")
+    if not ticker:
+        return False
+    if db.alert_already_sent(ticker, kind, within_hours=48):  # tell us once, not every scan
+        return False
+
+    c = stock.get("coiled") or {}
+    header = "🚀 *BREAKOUT TRIGGER*" if kind == "breakout" else "🌱 *COILED SPRING LOADED*"
+    detail = f"\n⊟ {c.get('state')} {c.get('coiled_score', 0):.0f}/100"
+    reasons = c.get("reasons") or []
+    if reasons:
+        detail += " · " + " · ".join(reasons[:2])
+
+    body = f"{header}\n\n{_format_stock(stock)}{detail}"
+    if _send(body):
+        db.log_alert(ticker, kind, {"coiled_score": c.get("coiled_score")})
+        return True
+    return False
+
+
 def alert_watchlist_move(ticker: str, old_price: float, new_price: float, item: dict) -> bool:
     """Alert when a watchlist stock moves significantly."""
     if not item:
@@ -180,6 +202,14 @@ def process_scan_results(ranked_stocks: list, ai_picks: list = None):
             continue
         atype = "new_alert" if stock.get("multi_signal_alert") else "high_conviction"
         alert_new_pick(stock, atype)
+
+    # Pre-breakout setups across the whole ranking — catch them before/at launch.
+    breaking = [s for s in ranked_stocks if (s.get("coiled") or {}).get("state") == "BREAKING"]
+    coiled = [s for s in ranked_stocks if (s.get("coiled") or {}).get("state") == "COILED"]
+    for stock in breaking[:3]:
+        alert_coiled(stock, "breakout")
+    for stock in coiled[:3]:
+        alert_coiled(stock, "coiled")
 
     # Check watchlist for big moves
     watchlist = db.get_watchlist()

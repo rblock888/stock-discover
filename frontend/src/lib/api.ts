@@ -60,7 +60,7 @@ export interface RegimeTilt {
 export interface CoiledBlock {
   available: boolean;
   coiled_score: number;
-  state: "COILED" | "BASING" | "EXTENDED" | "NO SETUP" | "UNKNOWN";
+  state: "BREAKING" | "COILED" | "BASING" | "EXTENDED" | "NO SETUP" | "UNKNOWN";
   summary?: string;
   squeeze_pctile?: number;
   range_pct?: number;

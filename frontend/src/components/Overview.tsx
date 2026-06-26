@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Brief,
+  CapitalFlow,
   DashboardResponse,
+  MacroAsset,
+  MacroDesk,
   MarketRegimeResponse,
   SectorHeat,
   SqueezeCandidate,
@@ -308,6 +311,118 @@ function BriefCard({ brief }: { brief: Brief | null }) {
           })}
         </div>
       )}
+    </Card>
+  );
+}
+
+// ─── AI Macro Desk + Capital Flow ─────────────────────────────────────────────
+
+const BIAS_COLOR: Record<string, string> = {
+  BULLISH: "var(--green)", NEUTRAL: "var(--amber)", BEARISH: "var(--red)",
+  "RISK-ON": "var(--green)", "RISK-OFF": "var(--red)",
+  "RISK-SEEKING": "var(--green)", DEFENSIVE: "var(--red)", BALANCED: "var(--amber)",
+};
+const BIAS_ARROW: Record<string, string> = { BULLISH: "▲", NEUTRAL: "‒", BEARISH: "▼" };
+
+function BiasChip({ label }: { label: string }) {
+  const c = BIAS_COLOR[label] ?? "var(--text-muted)";
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-[0.06em] px-2 py-[2px] rounded-full"
+      style={{ backgroundColor: `color-mix(in srgb, ${c} 18%, transparent)`, color: c }}>
+      {label}
+    </span>
+  );
+}
+
+function AssetRow({ a }: { a: MacroAsset }) {
+  const c = BIAS_COLOR[a.bias];
+  const r = a.ret_1m_pct;
+  return (
+    <div className="flex items-center gap-2">
+      <span style={{ color: c, fontSize: 9 }}>{BIAS_ARROW[a.bias]}</span>
+      <span className="text-[11px] flex-1 truncate" style={{ color: "var(--text-secondary)" }}>{a.name}</span>
+      <span className="text-[10px] tabular-nums w-[46px] text-right"
+        style={{ fontFamily: "var(--font-mono)", color: (r ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+        {r != null ? `${r >= 0 ? "+" : ""}${r.toFixed(1)}%` : "—"}
+      </span>
+    </div>
+  );
+}
+
+function MacroDeskCard({ desk }: { desk?: MacroDesk }) {
+  if (!desk?.available) {
+    return <Card title="AI Macro Desk"><Placeholder text="Macro data loading…" /></Card>;
+  }
+  return (
+    <Card
+      title="AI Macro Desk"
+      accent={BIAS_COLOR[desk.bias_label]}
+      tint={`color-mix(in srgb, ${BIAS_COLOR[desk.bias_label]} 13%, transparent)`}
+      right={<BiasChip label={desk.bias_label} />}
+    >
+      <p className="text-[11px] leading-relaxed mb-3" style={{ color: "var(--text-secondary)" }}>
+        {desk.narrative}
+      </p>
+      <div className="grid grid-cols-2 gap-x-5 gap-y-[7px]">
+        {desk.assets.map((a) => <AssetRow key={a.key} a={a} />)}
+      </div>
+      <div className="text-[9px] mt-2.5" style={{ color: "var(--text-muted)" }}>1-month trend bias · cross-asset</div>
+    </Card>
+  );
+}
+
+function MoverList({ title, movers, positive }: { title: string; movers?: { symbol: string; name: string; ret_5d_pct: number }[]; positive?: boolean }) {
+  return (
+    <div>
+      <div className="text-[9px] uppercase tracking-[0.08em] mb-1.5" style={{ color: positive ? "var(--green)" : "var(--red)" }}>{title}</div>
+      <div className="space-y-1">
+        {(movers ?? []).map((m) => (
+          <div key={m.symbol} className="flex items-center justify-between text-[10px]">
+            <span className="truncate" style={{ color: "var(--text-secondary)" }}>{m.name}</span>
+            <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)", color: m.ret_5d_pct >= 0 ? "var(--green)" : "var(--red)" }}>
+              {m.ret_5d_pct >= 0 ? "+" : ""}{m.ret_5d_pct.toFixed(1)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CapitalFlowCard({ flow }: { flow?: CapitalFlow }) {
+  if (!flow?.available) {
+    return <Card title="Capital Flow"><Placeholder text="Flow data loading…" /></Card>;
+  }
+  const color = BIAS_COLOR[flow.flow_label ?? "BALANCED"];
+  const active = flow.flow_label === "DEFENSIVE" ? 0 : flow.flow_label === "RISK-SEEKING" ? 2 : 1;
+  return (
+    <Card
+      title="Capital Flow"
+      accent={color}
+      tint={`color-mix(in srgb, ${color} 13%, transparent)`}
+      right={<BiasChip label={flow.flow_label ?? "BALANCED"} />}
+    >
+      <div className="mb-3.5">
+        <ScaleGauge stops={["Defensive", "Balanced", "Risk-on"]} activeIndex={active} position={flow.flow_score ?? 50} color={color} />
+      </div>
+      <div className="space-y-1.5 mb-3.5">
+        <div className="flex items-center justify-between text-[10px]">
+          <span style={{ color: "var(--text-muted)" }}>Into risk · QQQ·IWM·SMH·HY·BTC</span>
+          <span className="tabular-nums font-semibold" style={{ fontFamily: "var(--font-mono)", color: (flow.risk_on_ret_5d ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+            {(flow.risk_on_ret_5d ?? 0) >= 0 ? "+" : ""}{flow.risk_on_ret_5d?.toFixed(1)}% 5d
+          </span>
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span style={{ color: "var(--text-muted)" }}>Into safety · Util·Staples·TLT·Gold</span>
+          <span className="tabular-nums font-semibold" style={{ fontFamily: "var(--font-mono)", color: (flow.risk_off_ret_5d ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+            {(flow.risk_off_ret_5d ?? 0) >= 0 ? "+" : ""}{flow.risk_off_ret_5d?.toFixed(1)}% 5d
+          </span>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-4 pt-2.5" style={{ borderTop: "1px solid var(--border-subtle)" }}>
+        <MoverList title="Inflows ›" movers={flow.leaders} positive />
+        <MoverList title="‹ Outflows" movers={flow.laggards} />
+      </div>
     </Card>
   );
 }
@@ -636,6 +751,12 @@ export function Overview({ data, onNavigate }: {
 
       {/* Daily brief */}
       <BriefCard brief={brief} />
+
+      {/* AI Macro Desk + Capital Flow */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <MacroDeskCard desk={regime?.available ? regime.macro_desk : undefined} />
+        <CapitalFlowCard flow={regime?.available ? regime.capital_flow : undefined} />
+      </div>
 
       {/* What changed + sector heat */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-4 items-start">

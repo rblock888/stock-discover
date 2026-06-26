@@ -486,6 +486,43 @@ export interface RegimeStripDay {
   vix: number;
 }
 
+export interface MacroAsset {
+  key: string;
+  name: string;
+  symbol: string;
+  bias: "BULLISH" | "NEUTRAL" | "BEARISH";
+  score: number;
+  ret_1m_pct: number | null;
+  ret_5d_pct: number | null;
+  risk_sign: number;
+}
+
+export interface MacroDesk {
+  available: boolean;
+  assets: MacroAsset[];
+  bias_score: number;
+  bias_label: "RISK-ON" | "NEUTRAL" | "RISK-OFF";
+  narrative: string;
+}
+
+export interface FlowMover {
+  symbol: string;
+  name: string;
+  ret_5d_pct: number;
+}
+
+export interface CapitalFlow {
+  available: boolean;
+  flow_score?: number;
+  flow_label?: "RISK-SEEKING" | "BALANCED" | "DEFENSIVE";
+  risk_on_ret_5d?: number;
+  risk_off_ret_5d?: number;
+  risk_on_ret_1m?: number | null;
+  risk_off_ret_1m?: number | null;
+  leaders?: FlowMover[];
+  laggards?: FlowMover[];
+}
+
 export interface MarketRegimeResponse {
   available: boolean;
   as_of?: string;
@@ -499,6 +536,8 @@ export interface MarketRegimeResponse {
   narrative?: string;
   advice?: string[];
   strip?: RegimeStripDay[];
+  macro_desk?: MacroDesk;
+  capital_flow?: CapitalFlow;
 }
 
 export async function getMarketRegime(): Promise<MarketRegimeResponse> {

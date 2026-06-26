@@ -27,7 +27,28 @@ SECTOR_NAMES = {
     "XLU": "Utilities", "XLB": "Materials", "XLRE": "Real Estate",
     "XLC": "Comm Svcs", "SMH": "Semis", "XBI": "Biotech",
 }
-ALL_SYMBOLS = INDICES + [VIX] + list(SECTOR_NAMES)
+# ── Cross-asset macro desk ──
+# (key, display, symbol, risk_sign) — risk_sign: +1 strength = risk-on,
+# -1 strength = risk-off, 0 = context only (shown but not in the risk composite)
+MACRO_ASSETS = [
+    ("equities",  "S&P 500",    "SPY",     +1),
+    ("growth",    "Nasdaq 100", "QQQ",     +1),
+    ("smallcaps", "Small caps", "IWM",     +1),
+    ("crypto",    "Bitcoin",    "BTC-USD", +1),
+    ("credit",    "HY credit",  "HYG",     +1),
+    ("rates",     "10Y yield",  "^TNX",    -1),
+    ("dollar",    "US dollar",  "UUP",     -1),
+    ("bonds",     "Long bonds", "TLT",      0),
+    ("gold",      "Gold",       "GLD",      0),
+    ("oil",       "Oil",        "USO",      0),
+]
+
+# Capital-flow rotation baskets (where is money rotating?)
+RISK_ON_BASKET = ["QQQ", "IWM", "SMH", "XLY", "HYG", "BTC-USD"]
+RISK_OFF_BASKET = ["XLU", "XLP", "TLT", "GLD", "XLV"]
+
+_MACRO_EXTRA = ["BTC-USD", "HYG", "^TNX", "UUP", "TLT", "GLD", "USO"]
+ALL_SYMBOLS = INDICES + [VIX] + list(SECTOR_NAMES) + _MACRO_EXTRA
 
 INDEX_WEIGHTS = {"SPY": 0.5, "QQQ": 0.3, "IWM": 0.2}
 INDEX_NAMES = {"SPY": "The S&P 500", "QQQ": "the Nasdaq 100", "IWM": "small caps"}
@@ -259,6 +280,120 @@ def _advice(label: str, vol_state: str, small_state: str) -> list:
     return bullets[:4]
 
 
+# ── Cross-asset macro desk + capital flow ────────────────────────────────────
+
+def _bias(closes: np.ndarray) -> tuple:
+    """Directional bias from MA structure + slope → (label, score 0-100)."""
+    c = float(closes[-1])
+    ma20 = float(np.mean(closes[-20:]))
+    ma50 = float(np.mean(closes[-50:]))
+    ma20_prior = float(np.mean(closes[-30:-10]))
+    slope = (ma20 / ma20_prior - 1.0) if ma20_prior > 0 else 0.0
+    if c > ma20 > ma50 and slope > 0.003:
+        score = 85.0
+    elif c > ma20 and c > ma50:
+        score = 68.0
+    elif c < ma20 < ma50 and slope < -0.003:
+        score = 15.0
+    elif c < ma20 and c < ma50:
+        score = 32.0
+    else:
+        score = 50.0
+    label = "BULLISH" if score >= 65 else ("BEARISH" if score < 40 else "NEUTRAL")
+    return label, score
+
+
+def _macro_narrative(by: dict, bias_label: str) -> str:
+    head = {
+        "RISK-ON": "Macro backdrop is risk-supportive",
+        "NEUTRAL": "Macro backdrop is mixed",
+        "RISK-OFF": "Macro backdrop is defensive",
+    }[bias_label]
+    tells = []
+    eq = by.get("equities")
+    if eq:
+        tells.append(f"equities {eq['bias'].lower()}")
+    rt = by.get("rates")
+    if rt and rt.get("ret_1m_pct") is not None:
+        tells.append("10Y yields rising (headwind)" if rt["ret_1m_pct"] > 0 else "10Y yields easing (tailwind)")
+    dl = by.get("dollar")
+    if dl:
+        tells.append("dollar firm" if dl["bias"] == "BULLISH" else ("dollar soft" if dl["bias"] == "BEARISH" else "dollar flat"))
+    cr = by.get("crypto")
+    if cr:
+        tells.append(f"Bitcoin {cr['bias'].lower()}")
+    cd = by.get("credit")
+    if cd:
+        tells.append(f"credit {cd['bias'].lower()}")
+    return head + " — " + ", ".join(tells) + "."
+
+
+def _macro_desk(data: dict) -> dict:
+    assets, risk_scores = [], []
+    for key, name, sym, sign in MACRO_ASSETS:
+        closes = _closes(data.get(sym))
+        if closes is None:
+            continue
+        label, score = _bias(closes)
+        r1, r5 = _ret(closes, 21), _ret(closes, 5)
+        assets.append({
+            "key": key, "name": name, "symbol": sym, "bias": label, "score": round(score),
+            "ret_1m_pct": round(r1 * 100, 2) if r1 is not None else None,
+            "ret_5d_pct": round(r5 * 100, 2) if r5 is not None else None,
+            "risk_sign": sign,
+        })
+        if sign != 0:
+            risk_scores.append(score if sign > 0 else (100 - score))
+    bias_score = round(sum(risk_scores) / len(risk_scores), 1) if risk_scores else 50.0
+    bias_label = "RISK-ON" if bias_score >= 60 else ("RISK-OFF" if bias_score < 42 else "NEUTRAL")
+    by = {a["key"]: a for a in assets}
+    return {
+        "available": bool(assets),
+        "assets": assets,
+        "bias_score": bias_score,
+        "bias_label": bias_label,
+        "narrative": _macro_narrative(by, bias_label) if assets else "",
+    }
+
+
+def _capital_flow(data: dict) -> dict:
+    def basket_ret(syms, days):
+        rs = [_ret(_closes(data.get(s)), days) for s in syms]
+        rs = [r for r in rs if r is not None]
+        return (sum(rs) / len(rs)) if rs else None
+
+    on5, off5 = basket_ret(RISK_ON_BASKET, 5), basket_ret(RISK_OFF_BASKET, 5)
+    on20, off20 = basket_ret(RISK_ON_BASKET, 21), basket_ret(RISK_OFF_BASKET, 21)
+    if on5 is None or off5 is None:
+        return {"available": False}
+
+    flow5 = on5 - off5
+    flow_score = _clamp(50 + flow5 * 600, 0, 100)  # ~2% on-vs-off spread → ~62
+    flow_label = "RISK-SEEKING" if flow_score >= 60 else ("DEFENSIVE" if flow_score < 40 else "BALANCED")
+
+    universe = {sym: name for _, name, sym, _ in MACRO_ASSETS}
+    universe.update({"SMH": "Semis", "XLY": "Discretionary", "XLU": "Utilities",
+                     "XLP": "Staples", "XLV": "Healthcare"})
+    movers = []
+    for sym, name in universe.items():
+        r = _ret(_closes(data.get(sym)), 5)
+        if r is not None:
+            movers.append({"symbol": sym, "name": name, "ret_5d_pct": round(r * 100, 2)})
+    movers.sort(key=lambda m: m["ret_5d_pct"], reverse=True)
+
+    return {
+        "available": True,
+        "flow_score": round(flow_score, 1),
+        "flow_label": flow_label,
+        "risk_on_ret_5d": round(on5 * 100, 2),
+        "risk_off_ret_5d": round(off5 * 100, 2),
+        "risk_on_ret_1m": round(on20 * 100, 2) if on20 is not None else None,
+        "risk_off_ret_1m": round(off20 * 100, 2) if off20 is not None else None,
+        "leaders": movers[:4],
+        "laggards": movers[-4:][::-1],
+    }
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def compute(breadth_universe_pct: float | None = None, universe_n: int | None = None) -> dict:
@@ -330,6 +465,8 @@ def compute(breadth_universe_pct: float | None = None, universe_n: int | None = 
         "narrative": _narrative(label, mood, indices, vol, small, sectors),
         "advice": _advice(label, vol["state"], small["state"]),
         "strip": _strip_safe(),
+        "macro_desk": _macro_desk(data),
+        "capital_flow": _capital_flow(data),
     }
 
 

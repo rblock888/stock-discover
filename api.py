@@ -57,6 +57,7 @@ import price_history
 import ticker_edge
 import pre_breakout
 import smad
+import book_signals
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -517,6 +518,13 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         result["smad"] = smad.compute(ticker, hist)
     except Exception:
         result["smad"] = dict(smad.UNAVAILABLE)
+
+    # Daily-bar book signals: market phase, RBS flip, reversal candle, volume
+    # profile, concrete trade plan (Supply & Demand Mastery + Institutional Intent)
+    try:
+        result["book"] = book_signals.compute(hist, zone=(result.get("smad") or {}).get("demand_zone"))
+    except Exception:
+        result["book"] = {"available": False}
 
     # Add competitor analysis
     comp = competitors.analyze(ticker)

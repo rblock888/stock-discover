@@ -212,6 +212,87 @@ function SmadView({ s }: { s: NonNullable<StockResult["smad"]> }) {
   );
 }
 
+const GRADE_C: Record<string, string> = { A: "var(--green)", B: "var(--accent-cyan)", C: "var(--amber)", AVOID: "var(--red)" };
+const GROUP_LABEL: Record<string, string> = { technical: "Technical", fundamental: "Fundamental", context: "Context" };
+
+function ConvictionView({ v }: { v: NonNullable<StockResult["setup"]> }) {
+  const color = GRADE_C[v.grade] ?? "var(--text-muted)";
+  const cf = v.confluence;
+  const plan = v.plan;
+  const groups: Array<"technical" | "fundamental" | "context"> = ["technical", "fundamental", "context"];
+  return (
+    <div className="space-y-3">
+      {/* Verdict banner */}
+      <div className="flex items-center gap-3 rounded-xl px-3 py-2.5"
+        style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${color} 35%, transparent)` }}>
+        <span className="w-9 h-9 rounded-lg flex items-center justify-center text-[18px] font-bold shrink-0"
+          style={{ backgroundColor: `color-mix(in srgb, ${color} 22%, transparent)`, color }}>
+          {v.grade === "—" ? "·" : v.grade}
+        </span>
+        <div className="min-w-0">
+          <div className="text-[13px] font-bold" style={{ color }}>{v.setup}</div>
+          <div className="text-[11px]" style={{ color: "var(--text-secondary)" }}>{v.thesis}</div>
+        </div>
+      </div>
+
+      {/* Trade plan */}
+      {plan && (
+        <div className="grid grid-cols-4 gap-1.5">
+          {[
+            ["Entry", `$${plan.entry}`, "var(--text-primary)"],
+            ["Stop", `$${plan.stop}`, "var(--red)"],
+            ["Target", `$${plan.target}`, "var(--green)"],
+            ["R:R", `${plan.rr}`, "var(--accent-bright)"],
+          ].map(([k, val, c]) => (
+            <div key={k} className="rounded-lg px-2 py-1.5 text-center" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-subtle)" }}>
+              <div className="text-[8px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>{k}</div>
+              <div className="text-[12px] font-bold tabular-nums" style={{ fontFamily: "var(--font-mono)", color: c }}>{val}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {plan && (
+        <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>Risk {plan.risk_pct}% to the structural stop</div>
+      )}
+
+      {/* Confluence checklist */}
+      {cf && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <span style={{ color: "var(--text-muted)" }}>Confluence</span>
+            <span className="font-bold" style={{ color: "var(--green)" }}>{cf.technical}T</span>
+            <span className="font-bold" style={{ color: "var(--accent-cyan)" }}>{cf.fundamental}F</span>
+            <span className="font-bold" style={{ color: "var(--amber)" }}>{cf.context}C</span>
+          </div>
+          {groups.map((g) => {
+            const items = cf.factors.filter((f) => f.group === g);
+            if (!items.length) return null;
+            return (
+              <div key={g}>
+                <div className="text-[9px] uppercase tracking-wide mb-0.5" style={{ color: "var(--text-muted)" }}>{GROUP_LABEL[g]}</div>
+                <div className="flex flex-wrap gap-1">
+                  {items.map((f) => (
+                    <span key={f.label} className="text-[10px] px-1.5 py-[2px] rounded"
+                      title={f.detail}
+                      style={{
+                        background: f.passed ? "color-mix(in srgb, var(--green) 14%, transparent)" : "rgba(255,255,255,0.03)",
+                        color: f.passed ? "var(--green)" : "var(--text-muted)",
+                        textDecoration: f.passed ? "none" : "line-through",
+                        opacity: f.passed ? 1 : 0.6,
+                      }}>
+                      {f.passed ? "✓" : "·"} {f.label}{f.passed && f.detail ? ` ${f.detail}` : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div>
@@ -320,6 +401,12 @@ export function TickerDrawer() {
         <div className="px-5 py-4 space-y-5">
           {q?.description && (
             <p className="text-[11px] leading-snug" style={{ color: "var(--text-secondary)" }}>{q.description}</p>
+          )}
+
+          {stock.setup && stock.setup.grade !== "—" && (
+            <Section title="Verdict · confluence">
+              <ConvictionView v={stock.setup} />
+            </Section>
           )}
 
           <Section title="Price · 6 months"><PriceChart ph={price} /></Section>

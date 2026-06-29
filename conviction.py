@@ -1,142 +1,170 @@
 """Conviction synthesis — the single answer: is this a good pick, and why?
 
-Collapses every signal (the early-upside detectors, regime, calibrated win-rate,
-fundamentals, squeeze) into ONE opinionated verdict per stock:
+This is the books' **Trade Confluence Checklist** ("4+ checks = high-confluence
+setup"), adapted to a daily-bar US-stock scanner. It does NOT invent a new score;
+it counts how many independent factors line up across THREE groups —
 
-  grade   A / B / C / AVOID / —     (— = no clear setup)
-  setup   the reason it's interesting (Spring reclaim, Demand-zone retest,
-          Breakout, Coiled spring, Accumulation base, ...)
-  thesis  one plain-language line
-  action  what to actually do (entry / stop hint)
+  TECHNICAL    the price-action setup (demand zone, reclaim, reversal, phase,
+               trend, volume, compression)            ← Supply & Demand Mastery
+  FUNDAMENTAL  company quality / fuel (fundamentals, catalyst, insiders,
+               squeeze, sentiment)                     ← the equity adaptation
+  CONTEXT      regime tailwind, liquidity, measured win-rate
 
-Priority is given to the EARLY-upside setups (catch it before it flies) and to
-MEASURED signals (calibrated win-rate). It's a transparent rule-based synthesis,
-not a black box — every grade shows its positives and cautions.
+— and grades by CONFLUENCE. The rule the books insist on (and the owner's point):
+a top-grade pick needs BOTH a clean technical setup AND fundamentals behind it,
+not one without the other. A grade is only as good as the trade plan under it, so
+each verdict carries a concrete entry / stop / target / R:R.
 """
 
 
 def _f(x, d=0.0):
     try:
         v = float(x)
-        return v if v == v else d  # NaN guard
+        return v if v == v else d
     except (TypeError, ValueError):
         return d
+
+
+def _raw(stock, bucket):
+    return _f((stock.get("breakdown", {}).get(bucket, {}) or {}).get("raw"))
 
 
 def assess(stock: dict, regime: dict | None = None) -> dict:
     coiled = stock.get("coiled") or {}
     smad = stock.get("smad") or {}
     edge = stock.get("edge") or {}
+    book = stock.get("book") or {}
     bearing = (edge.get("bearing") or {}).get("state")
     flow = (edge.get("flow") or {}).get("state")
+    above20 = bool(edge.get("above_20ma"))
     composite = _f(stock.get("composite"))
     cpw = stock.get("calibrated_p_win")
     tilt = _f((stock.get("tilt") or {}).get("factor"), 1.0)
     q = stock.get("quote") or {}
     mcap = _f(q.get("market_cap"))
-    fund = _f((stock.get("breakdown", {}).get("fundamentals", {}) or {}).get("raw"))
-    sq = stock.get("short_squeeze") or {}
+    sq = _f((stock.get("short_squeeze") or {}).get("score"))
     comp = stock.get("competitors") or {}
+    mood = (regime.get("mood") or {}).get("label") if regime and regime.get("available") else None
 
     cstate = coiled.get("state")
     sstate = smad.get("state")
     zone = smad.get("demand_zone")
+    phase = (book.get("phase") or {}).get("state")
+    rbs = book.get("rbs") or {}
+    rev = book.get("reversal") or {}
+    prof = book.get("profile") or {}
+    plan = book.get("plan")
 
-    # ── Hard AVOID conditions ──
+    fund, cat, ins, sent = _raw(stock, "fundamentals"), _raw(stock, "catalyst"), _raw(stock, "insider"), _raw(stock, "sentiment")
+
+    # ── Primary setup (priority: earliest / highest-odds first) ──
+    setup, base_action = None, None
+    if sstate == "SPRING":
+        setup, base_action = "Spring reclaim", "Long the reclaim; stop below the sweep low"
+    elif sstate == "DEMAND RETEST":
+        setup, base_action = "Demand-zone retest", "Buy the zone retest; stop below the zone"
+    elif cstate == "BREAKING":
+        setup, base_action = "Breakout", "Entry on the break / first pullback"
+    elif sstate == "BOS IMPULSE":
+        setup, base_action = "Breakout (structure)", "Long the impulse / pullback to the zone"
+    elif rbs.get("active"):
+        setup, base_action = "Reclaimed-level (RBS)", "Buy the held retest; stop below the level"
+    elif cstate == "COILED":
+        setup, base_action = "Coiled spring", "Watch for a volume break of the base pivot"
+    elif cstate == "BASING" or sstate == "ACCUMULATION" or phase == "ACCUMULATION":
+        setup, base_action = "Accumulation base", "On watch — wait for the spring / break"
+    elif composite >= 62 and comp.get("lagging") and _f(comp.get("gap")) > 20:
+        setup, base_action = "Lagging catch-up", "Sector ran, this lagged — catch-up candidate"
+
+    # ── Confluence checklist ──
+    def fac(label, group, passed, detail=""):
+        return {"label": label, "group": group, "passed": bool(passed), "detail": detail}
+
+    factors = [
+        # TECHNICAL
+        fac("Setup present", "technical", bool(setup), setup or "no setup"),
+        fac("Fresh demand zone", "technical", bool(zone) and sstate in ("DEMAND RETEST", "BOS IMPULSE", "SPRING"),
+            f"${zone[0]}–${zone[1]}" if zone else ""),
+        fac("Reclaimed support (RBS)", "technical", rbs.get("active"), rbs.get("detail", "")),
+        fac("Reversal candle", "technical", rev.get("bullish") and rev.get("at_low"), rev.get("name", "")),
+        fac("Accepted in value", "technical", prof.get("position") in ("inside", "above"),
+            f"price {prof.get('position')} value" if prof else ""),
+        fac("Phase: accumulation/markup", "technical", phase in ("ACCUMULATION", "MARKUP"),
+            (book.get("phase") or {}).get("detail", "")),
+        fac("Trend up (not down)", "technical", above20 and bearing not in ("DOWN", "CHOPPY DOWN"), bearing or ""),
+        fac("Volume confirms", "technical", flow in ("HEALTHY", "CROWDED") or cstate == "BREAKING", flow or ""),
+        # FUNDAMENTAL
+        fac("Strong fundamentals", "fundamental", fund >= 60, f"{fund:.0f}/100"),
+        fac("Catalyst", "fundamental", cat >= 60, f"{cat:.0f}/100"),
+        fac("Insider / ownership", "fundamental", ins >= 55, f"{ins:.0f}/100"),
+        fac("Squeeze fuel", "fundamental", sq >= 60, f"{sq:.0f}/100"),
+        fac("Positive sentiment", "fundamental", sent >= 55, f"{sent:.0f}/100"),
+        # CONTEXT
+        fac("Regime tailwind", "context", tilt >= 1.05 or mood == "RISK-ON", mood or f"tilt {tilt:.2f}"),
+        fac("Liquidity OK", "context", flow != "THIN", flow or ""),
+        fac("Measured win-rate", "context", cpw is not None and cpw >= 0.30, f"{cpw*100:.0f}%" if cpw is not None else ""),
+    ]
+    n_tech = sum(1 for f in factors if f["group"] == "technical" and f["passed"])
+    n_fund = sum(1 for f in factors if f["group"] == "fundamental" and f["passed"])
+    n_ctx = sum(1 for f in factors if f["group"] == "context" and f["passed"])
+    total = n_tech + n_fund + n_ctx
+
+    # ── Hard AVOID vetoes ──
     avoid = []
     if sstate == "BULL TRAP":
         avoid.append("fakeout — effort without result")
     if cstate == "EXTENDED":
         avoid.append(f"already extended +{_f(coiled.get('ret_3m_pct')):.0f}% in 3m")
-    if bearing == "DOWN":
-        avoid.append("downtrend")
+    if bearing == "DOWN" or phase == "MARKDOWN":
+        avoid.append("downtrend / markdown")
+    if phase == "DISTRIBUTION":
+        avoid.append("distribution — supply overhead")
     if flow == "THIN" and sstate not in ("SPRING", "DEMAND RETEST"):
         avoid.append("thin liquidity")
 
-    # ── Primary setup (priority: earliest / highest-odds first) ──
-    setup, base, action = None, 0.0, None
-    if sstate == "SPRING":
-        setup, base = "Spring reclaim", _f(smad.get("smad_score"), 60)
-        action = "Long the reclaim; stop below the sweep low"
-    elif sstate == "DEMAND RETEST":
-        setup, base = "Demand-zone retest", _f(smad.get("smad_score"), 60)
-        action = (f"Buy the retest into ${zone[0]}–${zone[1]}, stop below ${zone[0]}"
-                  if zone else "Buy the zone retest; tight stop below the zone")
-    elif cstate == "BREAKING":
-        setup, base = "Breakout", _f(coiled.get("coiled_score"), 60)
-        action = "Entry on the break or first shallow pullback"
-    elif sstate == "BOS IMPULSE":
-        setup, base = "Breakout (structure)", max(_f(smad.get("smad_score")), 50)
-        action = "Long the impulse / first pullback to the demand zone"
-    elif cstate == "COILED":
-        setup, base = "Coiled spring", _f(coiled.get("coiled_score"), 60)
-        action = "Watch for a volume break of the base pivot"
-    elif cstate == "BASING" or sstate == "ACCUMULATION":
-        setup, base = "Accumulation base", max(_f(coiled.get("coiled_score")), _f(smad.get("smad_score")), 45)
-        action = "On watch — wait for the spring or the break"
-    elif composite >= 62 and comp.get("lagging") and _f(comp.get("gap_3m")) > 20:
-        setup, base = "Lagging catch-up", composite * 0.7
-        action = "Sector ran, this lagged — catch-up candidate"
+    confluence = {"technical": n_tech, "fundamental": n_fund, "context": n_ctx, "total": total, "factors": factors}
+    score = min(100.0, 30 + 7 * n_tech + 8 * n_fund + 6 * n_ctx)
 
     if avoid:
         return {
-            "grade": "AVOID", "score": round(min(base or composite, 30)),
-            "setup": setup or "—", "thesis": "Avoid — " + ", ".join(avoid[:2]),
-            "action": "Skip / wait for a cleaner setup", "positives": [], "cautions": avoid,
+            "grade": "AVOID", "score": round(min(score, 30)), "setup": setup or "—",
+            "thesis": "Avoid — " + ", ".join(avoid[:2]), "action": "Skip / wait for a cleaner setup",
+            "confluence": confluence, "plan": None, "positives": [], "cautions": avoid,
         }
-
     if not setup:
         return {
-            "grade": "—", "score": round(min(composite, 40)), "setup": "—",
+            "grade": "—", "score": round(min(score, 40)), "setup": "—",
             "thesis": "No clear early-upside setup", "action": None,
-            "positives": [], "cautions": [],
+            "confluence": confluence, "plan": None, "positives": [], "cautions": [],
         }
 
-    # ── Conviction adjustments ──
-    score = base
-    pos, cau = [], []
-    mood = (regime.get("mood") or {}).get("label") if regime and regime.get("available") else None
+    # ── Grade by CONFLUENCE — A demands BOTH technical AND fundamental alignment ──
+    if n_tech >= 3 and n_fund >= 2 and n_ctx >= 1:
+        grade = "A"
+    elif n_tech >= 2 and n_fund >= 1:
+        grade = "B"
+    else:
+        grade = "C"
 
-    if tilt >= 1.08:
-        score += 6; pos.append("regime tailwind")
-    elif tilt <= 0.95:
-        score -= 8; cau.append("regime leaning against")
-    if mood == "RISK-ON":
-        score += 3
-    elif mood == "RISK-OFF":
-        score -= 6; cau.append("risk-off tape")
-
-    if cpw is not None:
-        if cpw >= 0.35:
-            score += 8; pos.append(f"{cpw * 100:.0f}% measured win-rate")
-        elif cpw < 0.18:
-            score -= 6; cau.append("low measured win-rate")
-
-    if fund >= 70:
-        score += 5; pos.append(f"fundamentals {fund:.0f}")
-    if composite >= 65:
-        score += 3
-    if _f(sq.get("score")) >= 65:
-        score += 4; pos.append(f"squeeze {_f(sq.get('score')):.0f}")
-    if 0 < mcap < 2e9 and mood == "RISK-ON":
-        score += 2  # small-cap in a risk-on tape
-
-    score = max(0.0, min(100.0, score))
-    grade = "A" if score >= 75 else ("B" if score >= 60 else "C")
-
-    bits = [setup]
-    # lead the thesis with the most INFORMATIVE positive (measured win / fundamentals
-    # / squeeze) over the generic "regime tailwind"
-    lead = next((p for p in pos if "regime" not in p), pos[0] if pos else None)
+    # thesis: setup + confluence + the most informative passing factor
+    lead = next((f for f in factors if f["passed"] and f["group"] == "fundamental"), None) \
+        or next((f for f in factors if f["passed"] and f["label"] not in ("Setup present", "Regime tailwind")), None)
+    bits = [setup, f"{n_tech}T·{n_fund}F confluence"]
     if lead:
-        bits.append(lead)
+        bits.append(f"{lead['label'].lower()} {lead['detail']}".strip())
     if mood:
         bits.append(mood.lower().replace("-", " ") + " tape")
-    thesis = " · ".join(bits)
-    if cau:
-        thesis += " — " + cau[0]
+    thesis = " · ".join(b for b in bits if b)
+
+    if plan:
+        action = f"Buy ${plan['entry']}, stop ${plan['stop']}, target ${plan['target']} ({plan['rr']}R)"
+    else:
+        action = base_action
+
+    positives = [f"{f['label']} ({f['detail']})" if f["detail"] else f["label"]
+                 for f in factors if f["passed"] and f["group"] in ("technical", "fundamental")][:5]
 
     return {
-        "grade": grade, "score": round(score), "setup": setup,
-        "thesis": thesis, "action": action, "positives": pos, "cautions": cau,
+        "grade": grade, "score": round(score), "setup": setup, "thesis": thesis, "action": action,
+        "confluence": confluence, "plan": plan, "positives": positives, "cautions": [],
     }

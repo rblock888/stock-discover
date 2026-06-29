@@ -257,6 +257,57 @@ def test_pre_breakout_unavailable_on_short_history():
     assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False
 
 
+# ── book_signals: daily-bar detectors from the books ─────────────────────────
+
+import book_signals
+
+
+def _ohlc_frame(o, h, l, c, v):
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v})
+
+
+def _synthetic_accumulation():
+    """Down-leg then a flat base = ACCUMULATION; ends with a hammer at the low."""
+    down = np.linspace(40, 20, 90)
+    base = 20 + np.random.default_rng(1).normal(0, 0.2, 60)
+    c = np.concatenate([down, base])
+    o = c + 0.05
+    h = c + 0.3
+    l = c - 0.3
+    v = np.full(len(c), 1_000_000.0)
+    # last candle = hammer (long lower wick, close near top of range)
+    o[-1], c[-1], h[-1], l[-1] = 20.0, 20.4, 20.5, 19.0
+    return _ohlc_frame(o, h, l, c, v)
+
+
+def test_book_market_phase_accumulation():
+    bk = book_signals.compute(_synthetic_accumulation())
+    assert bk["available"] is True
+    assert bk["phase"]["state"] in ("ACCUMULATION", "NEUTRAL")  # base after a decline
+
+
+def test_book_volume_profile_and_plan_shapes():
+    bk = book_signals.compute(_synthetic_accumulation())
+    prof = bk["profile"]
+    assert prof and prof["val"] <= prof["poc"] <= prof["vah"]
+    assert prof["position"] in ("above", "inside", "below")
+    plan = bk["plan"]
+    if plan:  # only when a tight structural stop exists
+        assert plan["stop"] < plan["entry"] < plan["target"]
+        assert plan["rr"] > 0
+
+
+def test_book_reversal_hammer_detected():
+    rev = book_signals.compute(_synthetic_accumulation())["reversal"]
+    assert rev is not None and rev["bullish"] is True
+
+
+def test_book_unavailable_on_short_history():
+    arr = np.arange(10.0, 30.0)
+    short = _ohlc_frame(arr, arr + 0.2, arr - 0.2, arr, np.full(20, 1e6))
+    assert book_signals.compute(short).get("available") is False
+
+
 # ── conviction: the synthesized verdict ──────────────────────────────────────
 
 import conviction
@@ -264,20 +315,42 @@ import conviction
 _RISK_ON = {"available": True, "mood": {"label": "RISK-ON"}}
 
 
-def test_conviction_grades_a_clean_setup():
+def test_conviction_grades_a_on_full_confluence():
+    """Clean technical setup + fundamentals + context + a plan = grade A with R:R."""
     stock = {
         "composite": 64, "calibrated_p_win": 0.42,
         "quote": {"market_cap": 6e8},
-        "breakdown": {"fundamentals": {"raw": 82}},
+        "breakdown": {"fundamentals": {"raw": 82}, "catalyst": {"raw": 70}, "insider": {"raw": 58}},
         "tilt": {"factor": 1.12},
+        "short_squeeze": {"score": 66},
         "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
         "coiled": {"state": "BASING"},
-        "edge": {"flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {},
+                 "reversal": {}, "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
     }
     v = conviction.assess(stock, _RISK_ON)
-    assert v["grade"] in ("A", "B")
+    assert v["grade"] == "A"
     assert v["setup"] == "Demand-zone retest"
-    assert v["action"] and "4.0" in v["action"]
+    assert v["confluence"]["technical"] >= 3 and v["confluence"]["fundamental"] >= 2
+    assert "Buy $4.2" in v["action"] and "2.3R" in v["action"]
+
+
+def test_conviction_b_without_fundamentals():
+    """A technical setup with no fundamental backing can't grade A — the books' rule."""
+    stock = {
+        "composite": 55, "calibrated_p_win": 0.33,
+        "quote": {"market_cap": 6e8}, "breakdown": {"fundamentals": {"raw": 40}},
+        "tilt": {"factor": 1.10},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 70, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "MARKUP"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "above"}, "plan": None},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] in ("B", "C")  # never A without fundamentals
 
 
 def test_conviction_avoids_bull_trap_and_extended():

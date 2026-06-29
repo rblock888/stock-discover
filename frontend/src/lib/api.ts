@@ -82,12 +82,35 @@ export interface SmadBlock {
   reasons?: string[];
 }
 
+export interface ConfluenceFactor {
+  label: string;
+  group: "technical" | "fundamental" | "context";
+  passed: boolean;
+  detail: string;
+}
+
+export interface TradePlan {
+  entry: number;
+  stop: number;
+  target: number;
+  rr: number;
+  risk_pct: number;
+}
+
 export interface SetupVerdict {
   grade: "A" | "B" | "C" | "AVOID" | "—";
   score: number;
   setup: string;
   thesis: string;
   action: string | null;
+  confluence?: {
+    technical: number;
+    fundamental: number;
+    context: number;
+    total: number;
+    factors: ConfluenceFactor[];
+  };
+  plan?: TradePlan | null;
   positives: string[];
   cautions: string[];
 }

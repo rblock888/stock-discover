@@ -1,44 +1,88 @@
 """
-Telegram alerts module — sends notifications for new opportunities.
+Push-notification alerts — sends opportunities to Pushover and/or Telegram.
 
-Setup:
-1. Create a Telegram bot via @BotFather, get token
-2. Send any message to your bot
-3. Visit https://api.telegram.org/bot<TOKEN>/getUpdates to find your chat_id
-4. Set env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+Setup (use either or both; alerts go to every configured channel):
 
-Alert types:
-- "new_alert": stock just became multi-signal alert
-- "ai_pick": new AI top pick (high ml_score)
-- "watchlist_move": watchlist stock moved >5%
-- "improving": existing pick scored higher
+  Pushover (https://pushover.net):
+    1. Install the Pushover app, copy your USER KEY from the dashboard
+    2. Create an Application/API token (one-time) for "Stock Discovery"
+    3. Set env vars: PUSHOVER_USER, PUSHOVER_TOKEN
+
+  Telegram:
+    1. Create a bot via @BotFather, get the token
+    2. Message the bot, find your chat_id via getUpdates
+    3. Set env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+Alert types: new_alert, high_conviction, coiled, breakout, improving, watchlist.
 """
 
 import os
+import re
 import requests
 import db
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+PUSHOVER_TOKEN = os.environ.get("PUSHOVER_TOKEN", "")
+PUSHOVER_USER = os.environ.get("PUSHOVER_USER", "")
 
 
-def is_configured() -> bool:
+def _telegram_configured() -> bool:
     return bool(BOT_TOKEN and CHAT_ID)
 
 
-def _send(text: str, parse_mode: str = "Markdown") -> bool:
-    if not is_configured():
-        return False
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text, "parse_mode": parse_mode,
-                  "disable_web_page_preview": True},
-            timeout=10,
-        )
-        return resp.status_code == 200
-    except Exception:
-        return False
+def _pushover_configured() -> bool:
+    return bool(PUSHOVER_TOKEN and PUSHOVER_USER)
+
+
+def is_configured() -> bool:
+    return _telegram_configured() or _pushover_configured()
+
+
+def _md_to_html(text: str) -> str:
+    """Telegram *bold* / _italic_ → Pushover-supported HTML."""
+    text = re.sub(r"\*(.+?)\*", r"<b>\1</b>", text)
+    text = re.sub(r"_(.+?)_", r"<i>\1</i>", text)
+    return text
+
+
+def _send(text: str, title: str = None, parse_mode: str = "Markdown") -> bool:
+    """Send to every configured channel. Returns True if any delivery succeeded."""
+    if title is None:
+        # derive a title from the first line (strip markdown + emoji-free is fine)
+        first = text.split("\n", 1)[0]
+        title = re.sub(r"[*_]", "", first).strip()[:250] or "Stock Discovery"
+    sent = False
+
+    if _pushover_configured():
+        try:
+            # message body = everything after the first line (title carries the header)
+            body = text.split("\n", 1)[1].strip() if "\n" in text else text
+            resp = requests.post(
+                "https://api.pushover.net/1/messages.json",
+                data={
+                    "token": PUSHOVER_TOKEN, "user": PUSHOVER_USER,
+                    "title": title, "message": _md_to_html(body)[:1024], "html": 1,
+                },
+                timeout=10,
+            )
+            sent = sent or resp.status_code == 200
+        except Exception:
+            pass
+
+    if _telegram_configured():
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": text, "parse_mode": parse_mode,
+                      "disable_web_page_preview": True},
+                timeout=10,
+            )
+            sent = sent or resp.status_code == 200
+        except Exception:
+            pass
+
+    return sent
 
 
 def _format_stock(stock: dict) -> str:

@@ -257,6 +257,45 @@ def test_pre_breakout_unavailable_on_short_history():
     assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False
 
 
+# ── alerts: multi-channel dispatch (Pushover + Telegram) ─────────────────────
+
+import alerts
+
+
+def test_alerts_dispatch_to_pushover(monkeypatch):
+    monkeypatch.setattr(alerts, "PUSHOVER_TOKEN", "tok")
+    monkeypatch.setattr(alerts, "PUSHOVER_USER", "usr")
+    monkeypatch.setattr(alerts, "BOT_TOKEN", "")
+    monkeypatch.setattr(alerts, "CHAT_ID", "")
+    calls = {}
+
+    class _R:
+        status_code = 200
+
+    def _post(url, **kw):
+        calls["url"] = url
+        calls["data"] = kw.get("data")
+        return _R()
+
+    monkeypatch.setattr(alerts.requests, "post", _post)
+    assert alerts.is_configured() is True
+    ok = alerts._send("🚀 *BREAKOUT*\n\n*$ABCD* up *11%*")
+    assert ok is True
+    assert calls["url"] == "https://api.pushover.net/1/messages.json"
+    assert calls["data"]["title"] == "🚀 BREAKOUT"           # markdown stripped
+    assert "<b>$ABCD</b>" in calls["data"]["message"]        # *bold* -> <b>
+    assert calls["data"]["html"] == 1
+
+
+def test_alerts_not_configured_when_no_channel(monkeypatch):
+    monkeypatch.setattr(alerts, "PUSHOVER_TOKEN", "")
+    monkeypatch.setattr(alerts, "PUSHOVER_USER", "")
+    monkeypatch.setattr(alerts, "BOT_TOKEN", "")
+    monkeypatch.setattr(alerts, "CHAT_ID", "")
+    assert alerts.is_configured() is False
+    assert alerts._send("x") is False
+
+
 # ── smad: smart-money accumulation / demand-zone states ──────────────────────
 
 import smad

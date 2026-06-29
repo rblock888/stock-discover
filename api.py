@@ -876,13 +876,27 @@ async def get_backtest():
 
 @app.get("/api/alerts/recent")
 async def get_recent_alerts():
-    return {"alerts": db.get_recent_alerts(limit=20), "telegram_configured": alerts_module.is_configured()}
+    return {
+        "alerts": db.get_recent_alerts(limit=20),
+        "configured": alerts_module.is_configured(),
+        "channels": {
+            "pushover": alerts_module._pushover_configured(),
+            "telegram": alerts_module._telegram_configured(),
+        },
+    }
 
 
 @app.post("/api/alerts/test")
 async def test_alert():
     success = alerts_module.send_test()
-    return {"sent": success, "configured": alerts_module.is_configured()}
+    return {
+        "sent": success,
+        "configured": alerts_module.is_configured(),
+        "channels": {
+            "pushover": alerts_module._pushover_configured(),
+            "telegram": alerts_module._telegram_configured(),
+        },
+    }
 
 
 # ────────────────────────────────────────────

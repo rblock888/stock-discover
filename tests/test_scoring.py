@@ -257,6 +257,50 @@ def test_pre_breakout_unavailable_on_short_history():
     assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False
 
 
+# ── smad: smart-money accumulation / demand-zone states ──────────────────────
+
+import smad
+
+
+def _ohlc(o, h, l, c, v):
+    idx = pd.date_range("2024-01-01", periods=len(c), freq="D")
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=idx)
+
+
+def test_smad_spring_on_sweep_and_reclaim():
+    rng = np.random.default_rng(1)
+    n = 125
+    c = np.concatenate([np.full(124, 20.0) + rng.normal(0, 0.12, 124), [19.9]])
+    o = c.copy(); h = c + 0.08; l = c - 0.08; v = np.full(n, 1e6)
+    o[-1] = 20.0; h[-1] = 20.05; l[-1] = 18.5; c[-1] = 19.9; v[-1] = 1.9e6  # wick below base, reclaimed
+    assert smad.compute("X", _ohlc(o, h, l, c, v))["state"] == "SPRING"
+
+
+def test_smad_bull_trap_on_effort_without_result():
+    rng = np.random.default_rng(1)
+    n = 125
+    c = np.concatenate([np.full(124, 20.0) + rng.normal(0, 0.12, 124), [20.15]])
+    o = c.copy(); h = c + 0.08; l = c - 0.08; v = np.full(n, 1e6)
+    o[-1] = 20.2; h[-1] = 22.0; l[-1] = 20.0; c[-1] = 20.15; v[-1] = 2.6e6  # spike, tiny body, rejected
+    out = smad.compute("X", _ohlc(o, h, l, c, v))
+    assert out["state"] == "BULL TRAP" and out["trap"] == "hard"
+
+
+def test_smad_bos_impulse_clears_swing_high_on_volume():
+    rng = np.random.default_rng(2)
+    base = np.full(120, 20.0) + rng.normal(0, 0.15, 120)
+    base[60] = 21.5  # prior swing high
+    c = np.concatenate([base, [20.2, 22.2]])
+    n = len(c)
+    o = c.copy(); h = c + 0.1; l = c - 0.1; v = np.full(n, 1e6)
+    o[-1] = 20.3; h[-1] = 22.3; l[-1] = 20.25; c[-1] = 22.2; v[-1] = 2.2e6  # wide top-close breakout
+    assert smad.compute("X", _ohlc(o, h, l, c, v))["state"] == "BOS IMPULSE"
+
+
+def test_smad_unavailable_on_short_history():
+    assert smad.compute("X", _ohlc(*([np.full(60, 10.0)] * 4 + [np.full(60, 1e6)])))["available"] is False
+
+
 def test_pre_breakout_detects_breakout_on_volume():
     # ~120d tight base near 10, then a fresh pop above the pivot on heavy volume
     n = 124

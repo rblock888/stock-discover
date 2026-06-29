@@ -12,3 +12,7 @@ data.db
 
 # Machine-local Claude settings
 .claude/settings.local.json
+
+# Purchased copyrighted trading books — never commit
+books/
+.DS_Store

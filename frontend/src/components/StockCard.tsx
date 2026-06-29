@@ -261,6 +261,24 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 Extended
               </span>
             )}
+            {(() => {
+              const sm = stock.smad;
+              if (!sm?.available) return null;
+              const map: Record<string, [string, string, string]> = {
+                SPRING: ["⤴ Spring", "var(--green-bright)", "var(--green-dim)"],
+                "BOS IMPULSE": ["↗ BOS", "var(--green)", "var(--green-dim)"],
+                "DEMAND RETEST": ["◎ Retest", "var(--accent-cyan)", "color-mix(in srgb, var(--accent-cyan) 18%, transparent)"],
+                "BULL TRAP": ["⚠ Trap", "var(--red)", "var(--red-dim)"],
+              };
+              const m = map[sm.state];
+              if (!m) return null;
+              return (
+                <span className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                  style={{ backgroundColor: m[2], color: m[1] }} title={sm.summary}>
+                  {m[0]}
+                </span>
+              );
+            })()}
             {stock.short_squeeze && stock.short_squeeze.score >= 60 && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"

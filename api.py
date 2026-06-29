@@ -56,6 +56,7 @@ import squeeze_discovery
 import price_history
 import ticker_edge
 import pre_breakout
+import smad
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -508,6 +509,12 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         result["coiled"] = pre_breakout.compute(ticker, hist)
     except Exception:
         result["coiled"] = dict(pre_breakout.UNAVAILABLE)
+
+    # Smart-money accumulation / demand-zone (supply/demand + institutional intent)
+    try:
+        result["smad"] = smad.compute(ticker, hist)
+    except Exception:
+        result["smad"] = dict(smad.UNAVAILABLE)
 
     # Add competitor analysis
     comp = competitors.analyze(ticker)

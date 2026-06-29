@@ -70,11 +70,24 @@ export interface CoiledBlock {
   reasons?: string[];
 }
 
+export interface SmadBlock {
+  available: boolean;
+  smad_score: number;
+  state: "SPRING" | "BOS IMPULSE" | "DEMAND RETEST" | "ACCUMULATION" | "BULL TRAP" | "NONE" | "UNKNOWN";
+  summary?: string;
+  components?: { base: number; sweep_reclaim: number; impulse_bos: number; zone_retest: number };
+  trap?: string | null;
+  demand_zone?: [number, number] | null;
+  base_zone?: [number, number] | null;
+  reasons?: string[];
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
   edge?: EdgeBlock;
   coiled?: CoiledBlock;
+  smad?: SmadBlock;
   calibrated_p_win?: number | null;
   tilt?: RegimeTilt;
   rank_score?: number;

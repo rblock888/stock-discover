@@ -38,7 +38,7 @@ def init_db():
         existing = {r[1] for r in c.execute("PRAGMA table_info(scan_snapshots)").fetchall()}
         for col, decl in (("tilt_factor", "REAL"), ("regime_label", "TEXT"),
                           ("rank_score", "REAL"), ("bucket_scores", "TEXT"),
-                          ("coiled_score", "REAL")):
+                          ("coiled_score", "REAL"), ("smad_score", "REAL"), ("smad_state", "TEXT")):
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_snapshots ADD COLUMN {col} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_date ON scan_snapshots(scan_date)")
@@ -142,12 +142,14 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 ("fundamentals", "momentum", "catalyst", "insider", "sentiment")
             }) if bd else None
             coiled = (stock.get("coiled") or {}).get("coiled_score")
+            smad_obj = stock.get("smad") or {}
             try:
                 c.execute("""
                     INSERT OR IGNORE INTO scan_snapshots
                     (ticker, scan_date, price, composite_score, ml_score, early_score,
-                     is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores, coiled_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores,
+                     coiled_score, smad_score, smad_state)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     ticker,
                     scan_date,
@@ -162,6 +164,8 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                     stock.get("rank_score"),
                     bucket_scores,
                     coiled,
+                    smad_obj.get("smad_score"),
+                    smad_obj.get("state"),
                 ))
             except Exception:
                 continue

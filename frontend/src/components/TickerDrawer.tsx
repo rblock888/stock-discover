@@ -159,6 +159,59 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+const SMAD_COLOR: Record<string, string> = {
+  SPRING: "var(--green-bright)",
+  "BOS IMPULSE": "var(--green)",
+  "DEMAND RETEST": "var(--accent-cyan)",
+  ACCUMULATION: "var(--accent-bright)",
+  "BULL TRAP": "var(--red)",
+  NONE: "var(--text-muted)",
+};
+
+function SmadView({ s }: { s: NonNullable<StockResult["smad"]> }) {
+  const color = SMAD_COLOR[s.state] ?? "var(--text-muted)";
+  const comp = s.components;
+  const bars: [string, number][] = comp
+    ? [["base", comp.base], ["sweep", comp.sweep_reclaim], ["impulse", comp.impulse_bos], ["retest", comp.zone_retest]]
+    : [];
+  return (
+    <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.025)", border: `1px solid ${color}30` }}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[14px] font-bold tracking-[0.04em]" style={{ color }}>{s.state}</span>
+        <span className="text-[13px] font-bold tabular-nums" style={{ fontFamily: "var(--font-mono)", color }}>
+          {s.smad_score.toFixed(0)}<span className="text-[9px]" style={{ color: "var(--text-muted)" }}>/100</span>
+        </span>
+      </div>
+      <div className="text-[10px] mb-2.5" style={{ color: "var(--text-secondary)" }}>{s.summary}</div>
+      {bars.length > 0 && (
+        <div className="space-y-1 mb-2">
+          {bars.map(([k, val]) => (
+            <div key={k} className="flex items-center gap-2">
+              <span className="w-[52px] text-[9px] uppercase" style={{ color: "var(--text-muted)" }}>{k}</span>
+              <div className="flex-1 h-[5px] rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.06)" }}>
+                <div className="h-full rounded-full" style={{ width: `${val * 100}%`, backgroundColor: val > 0 ? color : "transparent" }} />
+              </div>
+              <span className="w-[26px] text-right text-[9px] tabular-nums" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{(val * 100).toFixed(0)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {s.demand_zone && (
+        <div className="text-[10px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+          Demand zone <b style={{ color }}>${s.demand_zone[0]}–${s.demand_zone[1]}</b> (buy the retest, stop below)
+        </div>
+      )}
+      {s.reasons && s.reasons.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {s.reasons.map((r, i) => (
+            <span key={i} className="text-[9px] px-1.5 py-[2px] rounded" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color }}>{r}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div>
@@ -283,6 +336,12 @@ export function TickerDrawer() {
           {stock.coiled?.available && (
             <Section title="Pre-breakout setup">
               <CoiledBlockView c={stock.coiled} />
+            </Section>
+          )}
+
+          {stock.smad?.available && stock.smad.state !== "NONE" && (
+            <Section title="Smart-money · supply/demand">
+              <SmadView s={stock.smad} />
             </Section>
           )}
 

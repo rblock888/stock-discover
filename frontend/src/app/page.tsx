@@ -59,11 +59,16 @@ function buildSegments(stocks: StockResult[]): Segment[] {
 
   take(
     "coiled",
-    "Coiled Springs",
-    "Breaking out · coiled · basing — caught before/at the launch (the opposite of chasing)",
+    "Early Upside",
+    "Coiled springs + smart-money accumulation — springs, demand-zone retests & breakouts caught early (not chasing)",
     "var(--accent-cyan)",
-    (s) => ["BREAKING", "COILED", "BASING"].includes(s.coiled?.state ?? "") && (s.coiled?.coiled_score ?? 0) >= 55,
-    (a, b) => (b.coiled?.coiled_score ?? 0) - (a.coiled?.coiled_score ?? 0),
+    (s) =>
+      (["BREAKING", "COILED", "BASING"].includes(s.coiled?.state ?? "") && (s.coiled?.coiled_score ?? 0) >= 55) ||
+      // smart-money early-long signals — but not if it's already extended (chase risk)
+      (["SPRING", "BOS IMPULSE", "DEMAND RETEST"].includes(s.smad?.state ?? "") && s.coiled?.state !== "EXTENDED"),
+    (a, b) =>
+      Math.max(b.coiled?.coiled_score ?? 0, b.smad?.smad_score ?? 0) -
+      Math.max(a.coiled?.coiled_score ?? 0, a.smad?.smad_score ?? 0),
   );
 
   take(

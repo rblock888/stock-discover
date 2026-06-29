@@ -257,6 +257,42 @@ def test_pre_breakout_unavailable_on_short_history():
     assert pre_breakout.compute("X", _frame([10] * 60))["available"] is False
 
 
+# ── conviction: the synthesized verdict ──────────────────────────────────────
+
+import conviction
+
+_RISK_ON = {"available": True, "mood": {"label": "RISK-ON"}}
+
+
+def test_conviction_grades_a_clean_setup():
+    stock = {
+        "composite": 64, "calibrated_p_win": 0.42,
+        "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}},
+        "tilt": {"factor": 1.12},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] in ("A", "B")
+    assert v["setup"] == "Demand-zone retest"
+    assert v["action"] and "4.0" in v["action"]
+
+
+def test_conviction_avoids_bull_trap_and_extended():
+    trap = {"composite": 60, "smad": {"available": True, "state": "BULL TRAP"}, "coiled": {}, "edge": {}}
+    assert conviction.assess(trap, _RISK_ON)["grade"] == "AVOID"
+    ext = {"composite": 70, "smad": {"available": True, "state": "BOS IMPULSE"},
+           "coiled": {"state": "EXTENDED", "ret_3m_pct": 90}, "edge": {}}
+    assert conviction.assess(ext, _RISK_ON)["grade"] == "AVOID"
+
+
+def test_conviction_no_setup_is_dash():
+    plain = {"composite": 38, "smad": {"available": True, "state": "NONE"}, "coiled": {"state": "NO SETUP"}, "edge": {}}
+    assert conviction.assess(plain, _RISK_ON)["grade"] == "—"
+
+
 # ── alerts: multi-channel dispatch (Pushover + Telegram) ─────────────────────
 
 import alerts

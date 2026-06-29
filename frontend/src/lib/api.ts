@@ -82,12 +82,23 @@ export interface SmadBlock {
   reasons?: string[];
 }
 
+export interface SetupVerdict {
+  grade: "A" | "B" | "C" | "AVOID" | "—";
+  score: number;
+  setup: string;
+  thesis: string;
+  action: string | null;
+  positives: string[];
+  cautions: string[];
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
   edge?: EdgeBlock;
   coiled?: CoiledBlock;
   smad?: SmadBlock;
+  setup?: SetupVerdict;
   calibrated_p_win?: number | null;
   tilt?: RegimeTilt;
   rank_score?: number;

@@ -206,6 +206,17 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 {stock.quote.change_pct.toFixed(2)}%
               </span>
             )}
+            {stock.setup && stock.setup.grade !== "—" && (() => {
+              const g = stock.setup.grade;
+              const col = g === "A" ? "var(--green)" : g === "B" ? "var(--accent-cyan)" : g === "C" ? "var(--amber)" : "var(--red)";
+              return (
+                <span className="text-[10px] font-bold px-1.5 py-[2px] rounded cursor-help"
+                  style={{ backgroundColor: `color-mix(in srgb, ${col} 20%, transparent)`, color: col }}
+                  title={`${stock.setup.setup} — ${stock.setup.thesis}${stock.setup.action ? `\n→ ${stock.setup.action}` : ""}`}>
+                  {g === "AVOID" ? "AVOID" : `Grade ${g}`}
+                </span>
+              );
+            })()}
             {stock.multi_signal_alert && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"

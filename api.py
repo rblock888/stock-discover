@@ -61,6 +61,7 @@ import market_regime
 import brief as brief_composer
 import evaluation
 import regime_tilt
+import conviction
 
 # Initialize database
 db.init_db()
@@ -160,6 +161,7 @@ def _run_full_pipeline():
             tilt = regime_tilt.compute_tilt(r, regime_now)
             r["tilt"] = tilt
             r["rank_score"] = round(r["composite"] * tilt["factor"], 1)
+            r["setup"] = conviction.assess(r, regime_now)  # single graded verdict
         ranked_list.sort(key=lambda x: x["rank_score"], reverse=True)
         alerts = [r["ticker"] for r in ranked_list if r["multi_signal_alert"]]
 

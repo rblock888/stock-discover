@@ -98,7 +98,7 @@ export interface TradePlan {
 }
 
 export interface SetupVerdict {
-  grade: "A" | "B" | "C" | "AVOID" | "—";
+  grade: "A" | "B" | "C" | "WATCH" | "AVOID" | "—";
   score: number;
   setup: string;
   thesis: string;

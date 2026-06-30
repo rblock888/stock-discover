@@ -718,7 +718,10 @@ const GRADE_COLOR: Record<string, string> = {
   A: "var(--green)",
   B: "var(--accent-cyan)",
   C: "var(--amber)",
+  WATCH: "var(--text-secondary)",
 };
+
+const GRADE_RANK: Record<string, number> = { A: 0, B: 1, C: 2, WATCH: 3 };
 
 function fmtPx(n?: number) {
   if (!n) return "—";
@@ -727,10 +730,14 @@ function fmtPx(n?: number) {
 
 function TopSetups({ ranked, stats }: { ranked: StockResult[]; stats?: Record<string, SetupStat> | null }) {
   const setups = ranked
-    .filter((s) => ["A", "B", "C"].includes(s.setup?.grade ?? ""))
-    .sort((a, b) => (b.setup?.score ?? 0) - (a.setup?.score ?? 0))
+    .filter((s) => ["A", "B", "C", "WATCH"].includes(s.setup?.grade ?? ""))
+    .sort((a, b) => {
+      const ga = GRADE_RANK[a.setup?.grade ?? ""] ?? 9;
+      const gb = GRADE_RANK[b.setup?.grade ?? ""] ?? 9;
+      return ga !== gb ? ga - gb : (b.setup?.score ?? 0) - (a.setup?.score ?? 0);
+    })
     .slice(0, 8);
-  const n = { A: 0, B: 0, C: 0 } as Record<string, number>;
+  const n = { A: 0, B: 0, C: 0, WATCH: 0 } as Record<string, number>;
   ranked.forEach((s) => { const g = s.setup?.grade; if (g && g in n) n[g]++; });
 
   return (
@@ -739,11 +746,11 @@ function TopSetups({ ranked, stats }: { ranked: StockResult[]; stats?: Record<st
         <div>
           <div className="text-[15px] font-bold" style={{ letterSpacing: "-0.02em" }}>Top Setups Today</div>
           <div className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
-            The synthesized answer — graded, with the action. Everything else is filtered out.
+            A/B/C are actionable (with a plan); WATCH are forming setups, no trigger yet.
           </div>
         </div>
         <div className="flex gap-1.5 text-[11px]">
-          {(["A", "B", "C"] as const).map((g) => (
+          {(["A", "B", "C", "WATCH"] as const).map((g) => (
             <span key={g} className="px-2 py-[3px] rounded-md font-bold tabular-nums"
               style={{ backgroundColor: `color-mix(in srgb, ${GRADE_COLOR[g]} 16%, transparent)`, color: GRADE_COLOR[g] }}>
               {n[g]} {g}
@@ -768,9 +775,9 @@ function TopSetups({ ranked, stats }: { ranked: StockResult[]; stats?: Record<st
                 className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[rgba(255,255,255,0.03)]"
                 style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-subtle)" }}
               >
-                <span className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-[15px] font-bold"
-                  style={{ backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`, color }}>
-                  {v.grade}
+                <span className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center font-bold"
+                  style={{ backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`, color, fontSize: v.grade === "WATCH" ? "13px" : "15px" }}>
+                  {v.grade === "WATCH" ? "◷" : v.grade}
                 </span>
                 <TickerLogo ticker={s.ticker} size={22} />
                 <div className="w-[88px] shrink-0">

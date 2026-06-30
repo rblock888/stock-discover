@@ -425,10 +425,26 @@ def test_conviction_b_without_fundamentals():
         "coiled": {"state": "BASING"},
         "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
         "book": {"available": True, "phase": {"state": "MARKUP"}, "rbs": {}, "reversal": {},
-                 "profile": {"position": "above"}, "plan": None},
+                 "profile": {"position": "above"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
     }
     v = conviction.assess(stock, _RISK_ON)
-    assert v["grade"] in ("B", "C")  # never A without fundamentals
+    assert v["grade"] in ("B", "C")  # never A without fundamentals (has a plan → not WATCH)
+
+
+def test_conviction_no_plan_is_watch():
+    """A real setup with no actionable plan is WATCH, not a tradeable grade."""
+    stock = {
+        "composite": 60, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 75}, "catalyst": {"raw": 65}},
+        "tilt": {"factor": 1.1},
+        "smad": {"available": True, "state": "ACCUMULATION"},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"}, "plan": None, "context": {"ret_20d": 3}},
+    }
+    assert conviction.assess(stock, _RISK_ON)["grade"] == "WATCH"
 
 
 def test_conviction_avoids_bull_trap_and_extended():

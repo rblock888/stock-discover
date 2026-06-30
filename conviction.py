@@ -80,7 +80,10 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         setup, base_action = "Bottoming (pre-confirm)", "On watch — needs the neckline break"
     elif cstate == "COILED":
         setup, base_action = "Coiled spring", "Watch for a volume break of the base pivot"
-    elif cstate == "BASING" or sstate == "ACCUMULATION" or phase == "ACCUMULATION":
+    elif (cstate == "BASING" or sstate == "ACCUMULATION" or phase == "ACCUMULATION") \
+            and phase != "MARKUP" and prof.get("position") != "above" \
+            and _f((book.get("context") or {}).get("ret_20d")) < 15:
+        # a real base is quiet & sideways — not a name already +15%/20d into new highs
         setup, base_action = "Accumulation base", "On watch — wait for the spring / break"
     elif composite >= 62 and comp.get("lagging") and _f(comp.get("gap")) > 20:
         setup, base_action = "Lagging catch-up", "Sector ran, this lagged — catch-up candidate"
@@ -193,11 +196,11 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         if grade in ("A", "B"):
             grade = "C"
 
-    # ── No actionable plan (audit): a long with no entry/stop is 'watch', not a buy ──
+    # ── No actionable plan (audit): a real setup with no defined entry/stop is a
+    # WATCH item (a forming base / pre-trigger), NOT a tradeable A/B/C buy ──
     if not plan:
-        if grade in ("A", "B"):
-            grade = "C"
-        score = min(score, 55)
+        grade = "WATCH"
+        score = min(score, 50)
 
     # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
     stat = (setup_stats or {}).get(setup)

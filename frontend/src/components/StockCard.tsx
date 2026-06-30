@@ -208,12 +208,14 @@ export function StockCard({ stock }: { stock: StockResult }) {
             )}
             {stock.setup && stock.setup.grade !== "—" && (() => {
               const g = stock.setup.grade;
-              const col = g === "A" ? "var(--green)" : g === "B" ? "var(--accent-cyan)" : g === "C" ? "var(--amber)" : "var(--red)";
+              const col = g === "A" ? "var(--green)" : g === "B" ? "var(--accent-cyan)" : g === "C" ? "var(--amber)"
+                : g === "WATCH" ? "var(--text-secondary)" : "var(--red)";
+              const label = g === "AVOID" ? "AVOID" : g === "WATCH" ? "WATCH" : `Grade ${g}`;
               return (
                 <span className="text-[10px] font-bold px-1.5 py-[2px] rounded cursor-help"
                   style={{ backgroundColor: `color-mix(in srgb, ${col} 20%, transparent)`, color: col }}
                   title={`${stock.setup.setup} — ${stock.setup.thesis}${stock.setup.action ? `\n→ ${stock.setup.action}` : ""}`}>
-                  {g === "AVOID" ? "AVOID" : `Grade ${g}`}
+                  {label}
                 </span>
               );
             })()}

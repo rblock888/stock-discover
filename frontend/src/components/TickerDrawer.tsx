@@ -212,7 +212,7 @@ function SmadView({ s }: { s: NonNullable<StockResult["smad"]> }) {
   );
 }
 
-const GRADE_C: Record<string, string> = { A: "var(--green)", B: "var(--accent-cyan)", C: "var(--amber)", AVOID: "var(--red)" };
+const GRADE_C: Record<string, string> = { A: "var(--green)", B: "var(--accent-cyan)", C: "var(--amber)", WATCH: "var(--text-secondary)", AVOID: "var(--red)" };
 const GROUP_LABEL: Record<string, string> = { technical: "Technical", fundamental: "Fundamental", context: "Context" };
 
 function ConvictionView({ v }: { v: NonNullable<StockResult["setup"]> }) {
@@ -227,7 +227,7 @@ function ConvictionView({ v }: { v: NonNullable<StockResult["setup"]> }) {
         style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${color} 35%, transparent)` }}>
         <span className="w-9 h-9 rounded-lg flex items-center justify-center text-[18px] font-bold shrink-0"
           style={{ backgroundColor: `color-mix(in srgb, ${color} 22%, transparent)`, color }}>
-          {v.grade === "—" ? "·" : v.grade}
+          {v.grade === "—" ? "·" : v.grade === "WATCH" ? "◷" : v.grade}
         </span>
         <div className="min-w-0">
           <div className="text-[13px] font-bold" style={{ color }}>{v.setup}</div>

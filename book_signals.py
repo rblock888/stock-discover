@@ -147,9 +147,10 @@ def _market_phase(c, h, l, atr):
     px = float(c[-1])
     ma50 = float(np.mean(c[-50:])) if n >= 50 else float(np.mean(c))
     ma200 = float(np.mean(c[-200:])) if n >= 200 else None
-    # the longer trend must agree before a short pop counts as MARKUP — else a sharp
-    # bounce in a downtrend (RBLX -64% off high) gets mislabeled bullish
-    uptrend_ok = px > ma50 and (ret60 > 0 or (ma200 is not None and px > ma200))
+    # the longer trend must agree before a short pop counts as MARKUP — a name below
+    # its 200-day MA is still in a downtrend no matter how hard it just bounced
+    # (CERT -54% off high, 60d up, but under the 200MA → REBOUND not MARKUP)
+    uptrend_ok = px > ma50 and (px > ma200 if ma200 is not None else ret60 > 0)
     p = round(pos, 2)
 
     # ── return-based overrides (a strong directional move is never "sideways") ──
@@ -346,7 +347,9 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
     else:
         target = entry + 2.0 * risk
     reward = target - entry
-    if reward <= 0:
+    # validity: a coherent plan needs stop < entry < target AND the target must still
+    # be above the CURRENT price (a pullback target price already blew past is stale)
+    if not (stop < entry < target) or reward <= 0 or target <= px * 1.005:
         return None
     return {
         "entry": round(entry, 4), "stop": round(stop, 4), "target": round(target, 4),

@@ -53,6 +53,77 @@ def _swing_lows(l, k=3):
     return idx
 
 
+def _ema(arr, span):
+    a = 2.0 / (span + 1.0)
+    e = float(arr[0])
+    out = np.empty(len(arr))
+    out[0] = e
+    for i in range(1, len(arr)):
+        e = a * float(arr[i]) + (1 - a) * e
+        out[i] = e
+    return out
+
+
+def _ema_structure(c):
+    """EMA 20/50/200 stack — the book demotes EMAs to 'confluence only', so this is
+    a supporting factor, not a trigger. Bullish stack = price>50>200, 20>50."""
+    n = len(c)
+    e20, e50 = _ema(c, 20), _ema(c, 50)
+    e200 = _ema(c, 200) if n >= 200 else None
+    px = float(c[-1])
+    stack = px > e50[-1] and e20[-1] > e50[-1] and (e200 is None or e50[-1] > e200[-1])
+    reclaim = px > e50[-1] and bool(np.any(c[-12:-1] < e50[-12:-1]))  # crossed back above 50 lately
+    return {
+        "stack_bullish": bool(stack),
+        "above_50": bool(px > e50[-1]),
+        "above_200": bool(e200 is not None and px > e200[-1]),
+        "reclaim": bool(reclaim),
+    }
+
+
+def _double_bottom(h, l, c, atr):
+    """W reversal: two swing lows at ~the same price, a neckline peak between them,
+    price now holding/breaking the neckline. A classic early-upside bottoming."""
+    n = len(c)
+    if n < 40 or atr <= 0:
+        return {"active": False}
+    sl = [i for i in _swing_lows(l, 3) if (n - 1 - i) <= 70]
+    if len(sl) < 2:
+        return {"active": False}
+    i1, i2 = sl[-2], sl[-1]
+    L1, L2 = float(l[i1]), float(l[i2])
+    if abs(L1 - L2) > max(0.5 * atr, 0.03 * L1):       # the two bottoms must match
+        return {"active": False}
+    neck = float(np.max(h[i1:i2 + 1]))
+    px = float(c[-1])
+    if px < L2:
+        return {"active": False}
+    return {"active": True, "low": round((L1 + L2) / 2, 4), "neckline": round(neck, 4),
+            "confirmed": bool(px > neck * 0.99)}
+
+
+def _reverse_hns(h, l, c, atr):
+    """Reverse head-and-shoulders: three swing lows, middle (head) lowest, outer
+    shoulders similar & higher; bullish on a neckline break."""
+    n = len(c)
+    if n < 60 or atr <= 0:
+        return {"active": False}
+    sl = [i for i in _swing_lows(l, 3) if (n - 1 - i) <= 90]
+    if len(sl) < 3:
+        return {"active": False}
+    a, b, d = sl[-3], sl[-2], sl[-1]
+    La, Lb, Ld = float(l[a]), float(l[b]), float(l[d])
+    if not (Lb < La and Lb < Ld):                       # head below both shoulders
+        return {"active": False}
+    if abs(La - Ld) > max(0.8 * atr, 0.05 * La):        # shoulders roughly level
+        return {"active": False}
+    neck = float(np.max(h[a:d + 1]))
+    px = float(c[-1])
+    if px < Ld:
+        return {"active": False}
+    return {"active": True, "neckline": round(neck, 4), "confirmed": bool(px > neck * 0.99)}
+
+
 def _market_phase(c, h, l, atr):
     """Wyckoff/Dow phase from trend structure: the current leg, and what preceded a
     sideways base (down→flat = accumulation, up→flat = distribution)."""
@@ -244,6 +315,9 @@ def compute(hist, zone=None):
             "rbs": rbs,
             "reversal": _reversal_candle(o, h, l, c, atr),
             "profile": profile,
+            "ema": _ema_structure(c),
+            "double_bottom": _double_bottom(h, l, c, atr),
+            "reverse_hns": _reverse_hns(h, l, c, atr),
             "plan": _trade_plan(h, l, c, atr, zone, profile, extra_support=rbs.get("level")),
         }
     except Exception:

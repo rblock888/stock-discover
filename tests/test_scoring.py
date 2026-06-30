@@ -308,6 +308,64 @@ def test_book_unavailable_on_short_history():
     assert book_signals.compute(short).get("available") is False
 
 
+def _wrap(c):
+    c = np.asarray(c, dtype=float)
+    return _ohlc_frame(c, c + 0.2, c - 0.2, c, np.full(len(c), 1e6))
+
+
+def test_book_double_bottom_detected():
+    c = np.concatenate([
+        np.linspace(30, 20, 24),      # decline to bottom 1
+        np.linspace(20, 26, 14),      # rise to neckline
+        np.linspace(26, 20.2, 14),    # decline to bottom 2 (~ same low)
+        np.linspace(20.2, 27, 12),    # break above neckline
+    ])
+    db = book_signals.compute(_wrap(c))["double_bottom"]
+    assert db["active"] is True and db["confirmed"] is True
+
+
+def test_book_reverse_hns_detected():
+    c = np.concatenate([
+        np.linspace(30, 24, 16),      # left shoulder low
+        np.linspace(24, 27, 12),
+        np.linspace(27, 21, 16),      # head (lowest)
+        np.linspace(21, 27, 14),
+        np.linspace(27, 24.2, 14),    # right shoulder (~ left)
+        np.linspace(24.2, 28, 12),    # break neckline
+    ])
+    rh = book_signals.compute(_wrap(c))["reverse_hns"]
+    assert rh["active"] is True
+
+
+def test_book_ema_stack_bullish_on_uptrend():
+    ema = book_signals.compute(_wrap(np.linspace(10, 30, 220)))["ema"]
+    assert ema["stack_bullish"] is True and ema["above_200"] is True
+
+
+# ── setup_backtest: trade simulation ─────────────────────────────────────────
+
+import setup_backtest
+
+
+def test_backtest_simulate_win_loss_timeout():
+    # win: target 12 reached before stop 9
+    h = np.array([10, 10.5, 12.2, 13.0])
+    l = np.array([10, 9.8, 11.0, 12.0])
+    c = np.array([10, 10.2, 12.0, 12.5])
+    assert setup_backtest._simulate(h, l, c, 0, 10.0, 9.0, 12.0) == pytest.approx(2.0)
+    # loss: stop 9 hit
+    h2 = np.array([10, 10.2, 10.1, 10.0])
+    l2 = np.array([10, 8.9, 9.5, 9.4])
+    c2 = np.array([10, 9.0, 9.6, 9.5])
+    assert setup_backtest._simulate(h2, l2, c2, 0, 10.0, 9.0, 12.0) == pytest.approx(-1.0)
+    # timeout: marked to last close (10.5 → +0.5R on 1.0 risk)
+    h3 = np.array([10, 10.4, 10.5, 10.6])
+    l3 = np.array([10, 9.7, 9.8, 9.9])
+    c3 = np.array([10, 10.3, 10.4, 10.5])
+    r = setup_backtest._simulate(h3, l3, c3, 0, 10.0, 9.0, 12.0)
+    assert r == pytest.approx(0.5, abs=0.2)
+
+
 # ── conviction: the synthesized verdict ──────────────────────────────────────
 
 import conviction

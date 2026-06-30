@@ -284,6 +284,13 @@ export interface DashboardResponse {
   last_scan: string | null;
   scan_in_progress: boolean;
   next_scan_in: number;
+  setup_stats: Record<string, SetupStat> | null;
+}
+
+export interface SetupStat {
+  win_rate: number;
+  avg_r: number;
+  n: number;
 }
 
 export async function getDashboard(): Promise<DashboardResponse> {

@@ -9,6 +9,7 @@ import {
   MacroDesk,
   MarketRegimeResponse,
   SectorHeat,
+  SetupStat,
   SqueezeCandidate,
   StockResult,
   WatchlistItem,
@@ -724,7 +725,7 @@ function fmtPx(n?: number) {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`;
 }
 
-function TopSetups({ ranked }: { ranked: StockResult[] }) {
+function TopSetups({ ranked, stats }: { ranked: StockResult[]; stats?: Record<string, SetupStat> | null }) {
   const setups = ranked
     .filter((s) => ["A", "B", "C"].includes(s.setup?.grade ?? ""))
     .sort((a, b) => (b.setup?.score ?? 0) - (a.setup?.score ?? 0))
@@ -777,7 +778,21 @@ function TopSetups({ ranked }: { ranked: StockResult[] }) {
                   <div className="text-[10px] tabular-nums mt-0.5" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{fmtPx(s.quote?.price)}</div>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-semibold" style={{ color }}>{v.setup}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-semibold" style={{ color }}>{v.setup}</span>
+                    {(() => {
+                      const st = stats?.[v.setup];
+                      if (!st || st.n < 8) return null;
+                      const good = st.avg_r > 0;
+                      return (
+                        <span className="text-[9px] px-1 py-[1px] rounded tabular-nums"
+                          title={`Historical backtest: ${st.win_rate}% hit target, ${st.avg_r > 0 ? "+" : ""}${st.avg_r}R expectancy over ${st.n} past setups`}
+                          style={{ backgroundColor: good ? "color-mix(in srgb, var(--green) 14%, transparent)" : "color-mix(in srgb, var(--red) 14%, transparent)", color: good ? "var(--green)" : "var(--red)" }}>
+                          {st.win_rate}% · {st.avg_r > 0 ? "+" : ""}{st.avg_r}R
+                        </span>
+                      );
+                    })()}
+                  </div>
                   <div className="text-[11px] truncate" style={{ color: "var(--text-secondary)" }}>{v.thesis}</div>
                   {v.action && (
                     <div className="text-[10px] truncate mt-0.5" style={{ color: "var(--accent-bright)" }}>→ {v.action}</div>
@@ -825,7 +840,7 @@ export function Overview({ data, onNavigate }: {
   return (
     <div className="p-5 max-w-[1200px] space-y-4">
       {/* THE answer — what's actually a good pick right now */}
-      <TopSetups ranked={ranked} />
+      <TopSetups ranked={ranked} stats={data?.setup_stats} />
 
       {/* Regime band */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

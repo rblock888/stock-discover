@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -58,6 +59,7 @@ import ticker_edge
 import pre_breakout
 import smad
 import book_signals
+import setup_backtest
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -229,6 +231,13 @@ def _run_full_pipeline():
         # ─── Recompose the daily brief on fresh scan data ───
         _recompose_brief()
 
+        # ─── Historical setup backtest (heavy; own daemon thread so the shared
+        # pool can't starve it; refresh at most every 6h) ───
+        if time.time() - _setup_bt_state["last"] > 6 * 3600:
+            _setup_bt_state["last"] = time.time()
+            tickers = [s["ticker"] for s in ranked_list]
+            threading.Thread(target=setup_backtest.refresh, args=(tickers,), daemon=True).start()
+
         logger.info(
             f"Pipeline done: {len(ranked_list)} scored, "
             f"{len(alerts)} alerts, {len(new_tickers)} new, "
@@ -320,6 +329,7 @@ def _run_secondary_pipelines():
 
 
 _eval_state = {"last": 0.0}
+_setup_bt_state = {"last": 0.0}
 EVAL_INTERVAL = 6 * 3600  # forward-return backfill is heavy (~200 fetches); every 6h
 
 
@@ -640,7 +650,24 @@ async def dashboard():
         "last_scan": cache["last_scan"],
         "scan_in_progress": cache["scan_in_progress"],
         "next_scan_in": _next_scan_seconds(),
+        "setup_stats": _setup_stats_map(),
     })
+
+
+def _setup_stats_map():
+    """Compact {setup_type: {win_rate, avg_r, n}} from the historical backtest, so
+    the UI can show each setup's measured edge next to it."""
+    bt = setup_backtest.get_cached().get("data")
+    if not bt:
+        return None
+    return {r["setup"]: {"win_rate": r["win_rate"], "avg_r": r["avg_r"], "n": r["n"]}
+            for r in bt.get("by_setup", [])}
+
+
+@app.get("/api/setup-backtest")
+async def get_setup_backtest():
+    """Full historical setup backtest — win-rate + expectancy per setup type."""
+    return _clean(setup_backtest.get_cached())
 
 
 def _next_scan_seconds() -> int:

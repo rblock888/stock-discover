@@ -53,6 +53,9 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
     rbs = book.get("rbs") or {}
     rev = book.get("reversal") or {}
     prof = book.get("profile") or {}
+    ema = book.get("ema") or {}
+    dbl = book.get("double_bottom") or {}
+    rhs = book.get("reverse_hns") or {}
     plan = book.get("plan")
 
     fund, cat, ins, sent = _raw(stock, "fundamentals"), _raw(stock, "catalyst"), _raw(stock, "insider"), _raw(stock, "sentiment")
@@ -67,8 +70,14 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
         setup, base_action = "Breakout", "Entry on the break / first pullback"
     elif sstate == "BOS IMPULSE":
         setup, base_action = "Breakout (structure)", "Long the impulse / pullback to the zone"
+    elif rhs.get("confirmed"):
+        setup, base_action = "Reverse H&S", "Long the neckline break; stop below the right shoulder"
+    elif dbl.get("confirmed"):
+        setup, base_action = "Double bottom", "Long the neckline break; stop below the second low"
     elif rbs.get("active"):
         setup, base_action = "Reclaimed-level (RBS)", "Buy the held retest; stop below the level"
+    elif dbl.get("active") or rhs.get("active"):
+        setup, base_action = "Bottoming (pre-confirm)", "On watch — needs the neckline break"
     elif cstate == "COILED":
         setup, base_action = "Coiled spring", "Watch for a volume break of the base pivot"
     elif cstate == "BASING" or sstate == "ACCUMULATION" or phase == "ACCUMULATION":
@@ -91,6 +100,10 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
             f"price {prof.get('position')} value" if prof else ""),
         fac("Phase: accumulation/markup", "technical", phase in ("ACCUMULATION", "MARKUP"),
             (book.get("phase") or {}).get("detail", "")),
+        fac("Double bottom / rev H&S", "technical", dbl.get("active") or rhs.get("active"),
+            "double bottom" if dbl.get("active") else ("reverse H&S" if rhs.get("active") else "")),
+        fac("EMA stack bullish", "technical", ema.get("stack_bullish") or ema.get("reclaim"),
+            "20>50>200" if ema.get("stack_bullish") else ("reclaimed 50EMA" if ema.get("reclaim") else "")),
         fac("Trend up (not down)", "technical", above20 and bearing not in ("DOWN", "CHOPPY DOWN"), bearing or ""),
         fac("Volume confirms", "technical", flow in ("HEALTHY", "CROWDED") or cstate == "BREAKING", flow or ""),
         # FUNDAMENTAL
@@ -138,8 +151,11 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
             "confluence": confluence, "plan": None, "positives": [], "cautions": [],
         }
 
-    # ── Grade by CONFLUENCE — A demands BOTH technical AND fundamental alignment ──
-    if n_tech >= 3 and n_fund >= 2 and n_ctx >= 1:
+    # ── Grade by CONFLUENCE — A demands BOTH technical AND fundamental alignment,
+    # AND an actionable plan with real reward-for-risk (the books' R:R rule). A
+    # watch-only setup (no tight entry) tops out at B no matter how it scores. ──
+    actionable = bool(plan) and _f(plan.get("rr")) >= 1.5
+    if actionable and n_tech >= 3 and n_fund >= 2 and n_ctx >= 1:
         grade = "A"
     elif n_tech >= 2 and n_fund >= 1:
         grade = "B"

@@ -140,7 +140,7 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
 
     if avoid:
         return {
-            "grade": "AVOID", "score": round(min(score, 30)), "setup": setup or "—",
+            "grade": "AVOID", "score": round(min(score, 30)), "setup": "—",
             "thesis": "Avoid — " + ", ".join(avoid[:2]), "action": "Skip / wait for a cleaner setup",
             "confluence": confluence, "plan": None, "positives": [], "cautions": avoid,
         }
@@ -154,7 +154,8 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
     # ── Grade by CONFLUENCE — A demands BOTH technical AND fundamental alignment,
     # AND an actionable plan with real reward-for-risk (the books' R:R rule). A
     # watch-only setup (no tight entry) tops out at B no matter how it scores. ──
-    actionable = bool(plan) and _f(plan.get("rr")) >= 1.5
+    rr = _f(plan.get("rr")) if plan else None
+    actionable = bool(plan) and rr >= 1.8
     if actionable and n_tech >= 3 and n_fund >= 2 and n_ctx >= 1:
         grade = "A"
     elif n_tech >= 2 and n_fund >= 1:
@@ -162,8 +163,27 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
     else:
         grade = "C"
 
-    # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
     cautions = []
+
+    # ── R:R floor (audit): a plan that pays under 1.5R can't be an actionable buy ──
+    if plan and rr < 1.5:
+        cautions.append(f"thin reward-for-risk ({rr:.2f}R)")
+        grade = "C"
+        score = min(score, 50)
+
+    # ── Falling-knife guard (audit): a sharp bounce that's still deep below the 1y
+    # high is counter-trend risk, not a base breakout — keep it visible but demote ──
+    poh = _f((book.get("context") or {}).get("pct_off_high"))
+    if poh <= -50:
+        cautions.append(f"deep drawdown {poh:.0f}% off 1y high — falling-knife risk")
+        if grade in ("A", "B"):
+            grade = "C"
+    elif poh <= -30:
+        cautions.append(f"{poh:.0f}% below 1y high — bounce risk, not a clean base")
+        if grade == "A":   # a local markup deep below the 1y high is still counter-trend
+            grade = "B"
+
+    # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
     stat = (setup_stats or {}).get(setup)
     if stat and stat.get("n", 0) >= 30:
         ar = _f(stat.get("avg_r"))

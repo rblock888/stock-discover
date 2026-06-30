@@ -94,6 +94,11 @@ def _double_bottom(h, l, c, atr):
     L1, L2 = float(l[i1]), float(l[i2])
     if abs(L1 - L2) > max(0.5 * atr, 0.03 * L1):       # the two bottoms must match
         return {"active": False}
+    # a real double bottom is in the LOWER part of the range after a decline, not a
+    # dip near parabolic highs (audit finding)
+    rng = max(float(np.max(h[-90:]) - np.min(l[-90:])), 1e-9) if n >= 90 else max(float(np.max(h) - np.min(l)), 1e-9)
+    if (L1 - float(np.min(l[-90:] if n >= 90 else l))) / rng > 0.4:
+        return {"active": False}
     neck = float(np.max(h[i1:i2 + 1]))
     px = float(c[-1])
     if px < L2:
@@ -125,8 +130,10 @@ def _reverse_hns(h, l, c, atr):
 
 
 def _market_phase(c, h, l, atr):
-    """Wyckoff/Dow phase from trend structure: the current leg, and what preceded a
-    sideways base (down→flat = accumulation, up→flat = distribution)."""
+    """Wyckoff/Dow phase from trend structure. A 40-bar slope alone lags badly — a
+    fresh breakout off a base still reads 'flat' for weeks — so recent RETURNS
+    override first: a stock up 8%+ over 20 days is in MARKUP, never accumulation,
+    and DISTRIBUTION only fires when price is actually rolling over near highs."""
     n = len(c)
     recent = c[-40:] if n >= 40 else c
     prior = c[-90:-40] if n >= 90 else None
@@ -134,32 +141,41 @@ def _market_phase(c, h, l, atr):
     s_prior = _slope_frac(prior) if prior is not None and len(prior) >= 20 else 0.0
 
     rng = max(float(np.max(h[-60:]) - np.min(l[-60:])), 1e-9) if n >= 5 else 1.0
-    pos = (c[-1] - np.min(l[-60:])) / rng if n >= 5 else 0.5  # 0=at lows, 1=at highs
+    pos = float((c[-1] - np.min(l[-60:])) / rng) if n >= 5 else 0.5  # 0=at lows, 1=at highs
+    ret20 = float(c[-1] / c[-21] - 1) if n > 21 else 0.0
+    ret60 = float(c[-1] / c[-61] - 1) if n > 61 else 0.0
+    p = round(pos, 2)
 
-    UP, DN = 0.06, -0.06  # ~6% drift over the window = a real leg
-    if s_recent >= UP:
-        return {"state": "MARKUP", "detail": "uptrend — higher highs & higher lows", "pos": round(float(pos), 2)}
+    # ── return-based overrides (a strong directional move is never "sideways") ──
+    if ret20 >= 0.08 and pos >= 0.45:
+        return {"state": "MARKUP", "detail": f"marking up — +{ret20*100:.0f}% in 20d", "pos": p}
+    if ret20 <= -0.08 and pos <= 0.55:
+        return {"state": "MARKDOWN", "detail": f"marking down — {ret20*100:.0f}% in 20d", "pos": p}
+
+    UP, DN = 0.05, -0.05
+    if s_recent >= UP and pos >= 0.5:
+        return {"state": "MARKUP", "detail": "uptrend — higher highs & higher lows", "pos": p}
     if s_recent <= DN:
-        return {"state": "MARKDOWN", "detail": "downtrend — lower highs & lower lows", "pos": round(float(pos), 2)}
-    # sideways now — classify by the prior leg
-    if s_prior <= DN:
-        return {"state": "ACCUMULATION", "detail": "basing after a decline — the pre-markup phase", "pos": round(float(pos), 2)}
-    if s_prior >= UP:
-        return {"state": "DISTRIBUTION", "detail": "stalling near highs after a run — supply overhead", "pos": round(float(pos), 2)}
-    return {"state": "NEUTRAL", "detail": "no clear phase", "pos": round(float(pos), 2)}
+        return {"state": "MARKDOWN", "detail": "downtrend — lower highs & lower lows", "pos": p}
+    # genuinely sideways — classify by the prior leg + where we sit in the range
+    if s_prior <= DN and pos <= 0.55 and ret20 < 0.05:
+        return {"state": "ACCUMULATION", "detail": "basing in the lower range after a decline", "pos": p}
+    if (s_prior >= UP or ret60 >= 0.15) and pos >= 0.7 and s_recent < 0:
+        return {"state": "DISTRIBUTION", "detail": "rolling over near highs — supply overhead", "pos": p}
+    return {"state": "NEUTRAL", "detail": "no clear phase", "pos": p}
 
 
 def _rbs(c, h, l, atr):
-    """Resistance-Becomes-Support: a prior swing-high level that price recently
-    closed above and is RIGHT NOW retesting from above and holding. Strict — price
-    must actually be sitting on the reclaimed level, not merely somewhere above it."""
+    """Resistance-Becomes-Support: a prior swing-high level that price has broken
+    above and is now HOLDING (not a one-bar poke). Hardened against the failure the
+    audit found — a single spike close above a twice-rejected resistance was being
+    called 'reclaimed'. Now requires sustained holding, rejects spike-bar reclaims
+    and chop-through levels."""
     n = len(c)
     if n < 40 or atr <= 0:
         return {"active": False}
     px = float(c[-1])
-    recent_lo = float(np.min(l[-3:]))
-    # candidate resistance: swing highs in the mid window (recent enough to matter,
-    # old enough to have been broken)
+    last5 = c[-5:]
     sh = [i for i in _swing_highs(h, 3) if 5 <= (n - 1 - i) <= 70]
     best = None
     for i in sh:
@@ -169,8 +185,18 @@ def _rbs(c, h, l, atr):
         # decisively reclaimed in the last ~25 bars
         if not np.any(c[max(i + 1, n - 25):] > level + 0.3 * atr):
             continue
-        # price is now PINNED to the level: a recent low tagged it and we still hold above
-        if recent_lo <= level + 0.4 * atr and (level - 0.2 * atr) <= px <= level + 0.8 * atr:
+        # HOLDING: at least 3 of the last 5 closes sit above the level (not a 1-bar poke)
+        if np.sum(last5 > level) < 3:
+            continue
+        # not a chop-through, range-middle level: reject if the close crossed it >3x
+        crossings = int(np.sum(np.diff(np.sign(c[max(i + 1, n - 40):] - level)) != 0))
+        if crossings > 3:
+            continue
+        # don't chase a spike reclaim (a single >15% up day that vaulted the level)
+        if float(np.max(np.abs(np.diff(c[-3:]) / c[-3:-1]))) > 0.15 and px > level + atr:
+            continue
+        # still a retest, not extended far above the shelf
+        if (level - 0.2 * atr) <= px <= level + 1.2 * atr:
             if best is None or level > best:
                 best = level
     if best is not None:
@@ -258,8 +284,13 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
         return None
     px = float(c[-1])
 
-    # nearest support BELOW price: swing lows + demand-zone low + reclaimed level
+    # nearest support BELOW price: swing lows + demand-zone low + reclaimed level.
+    # k=3 pivots can't see a low printed in the last 3 bars, so include the raw
+    # recent extremes too — else the stop lands ABOVE real support (audit finding).
     supports = [float(l[i]) for i in _swing_lows(l, 3) if (n - 1 - i) <= 60 and l[i] < px]
+    recent_low = float(np.min(l[-5:]))
+    if recent_low < px:
+        supports.append(recent_low)
     if zone and len(zone) == 2 and zone[0] and zone[1]:
         zlo = float(min(zone))
         if zlo < px:
@@ -271,10 +302,12 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
         return None
     support = max(supports)              # the closest support beneath price
     stop = support - 0.4 * atr
+    # never leave the stop above the most recent lows — clamp below the 3-bar low
+    stop = min(stop, float(np.min(l[-3:])) - 0.1 * atr)
     risk = px - stop
     if risk <= 0:
         return None
-    if risk / px > 0.10:                  # support too far → no tight entry (book: skip wide risk)
+    if risk / px > 0.12:                  # support too far → no tight entry (book: skip wide risk)
         return None
 
     # target: next meaningful resistance ≥ ~1 ATR (or 4%) above, else value-area
@@ -309,6 +342,13 @@ def compute(hist, zone=None):
         atr = _atr(h, l, c, 14)
         profile = _volume_profile(h, l, c, v)
         rbs = _rbs(c, h, l, atr)
+        hi = float(np.max(h))
+        lo = float(np.min(l))
+        px = float(c[-1])
+        context = {
+            "pct_off_high": round((px / hi - 1) * 100, 1) if hi else 0.0,
+            "range_pos": round((px - lo) / (hi - lo), 2) if hi > lo else 0.5,  # 0=at lows, 1=at highs
+        }
         return {
             "available": True,
             "phase": _market_phase(c, h, l, atr),
@@ -318,6 +358,7 @@ def compute(hist, zone=None):
             "ema": _ema_structure(c),
             "double_bottom": _double_bottom(h, l, c, atr),
             "reverse_hns": _reverse_hns(h, l, c, atr),
+            "context": context,
             "plan": _trade_plan(h, l, c, atr, zone, profile, extra_support=rbs.get("level")),
         }
     except Exception:

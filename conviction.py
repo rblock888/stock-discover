@@ -183,6 +183,22 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         if grade == "A":   # a local markup deep below the 1y high is still counter-trend
             grade = "B"
 
+    # ── Extended-into-supply (audit): a +25%/month run that's still under the prior
+    # distribution range (not a clean-air high) is a chase — dock it ──
+    ctx = book.get("context") or {}
+    ret20 = _f(ctx.get("ret_20d"))
+    if ret20 >= 25 and poh <= -12:
+        cautions.append(f"extended +{ret20:.0f}%/20d into overhead supply — chase risk")
+        score = max(0.0, score - 18)
+        if grade in ("A", "B"):
+            grade = "C"
+
+    # ── No actionable plan (audit): a long with no entry/stop is 'watch', not a buy ──
+    if not plan:
+        if grade in ("A", "B"):
+            grade = "C"
+        score = min(score, 55)
+
     # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
     stat = (setup_stats or {}).get(setup)
     if stat and stat.get("n", 0) >= 30:
@@ -206,7 +222,8 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         thesis += " — " + cautions[0]
 
     if plan:
-        action = f"Buy ${plan['entry']}, stop ${plan['stop']}, target ${plan['target']} ({plan['rr']}R)"
+        verb = "Buy pullback to" if plan.get("entry_type") == "pullback" else "Buy"
+        action = f"{verb} ${plan['entry']}, stop ${plan['stop']}, target ${plan['target']} ({plan['rr']}R)"
     else:
         action = base_action
 

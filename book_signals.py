@@ -144,16 +144,24 @@ def _market_phase(c, h, l, atr):
     pos = float((c[-1] - np.min(l[-60:])) / rng) if n >= 5 else 0.5  # 0=at lows, 1=at highs
     ret20 = float(c[-1] / c[-21] - 1) if n > 21 else 0.0
     ret60 = float(c[-1] / c[-61] - 1) if n > 61 else 0.0
+    px = float(c[-1])
+    ma50 = float(np.mean(c[-50:])) if n >= 50 else float(np.mean(c))
+    ma200 = float(np.mean(c[-200:])) if n >= 200 else None
+    # the longer trend must agree before a short pop counts as MARKUP — else a sharp
+    # bounce in a downtrend (RBLX -64% off high) gets mislabeled bullish
+    uptrend_ok = px > ma50 and (ret60 > 0 or (ma200 is not None and px > ma200))
     p = round(pos, 2)
 
     # ── return-based overrides (a strong directional move is never "sideways") ──
     if ret20 >= 0.08 and pos >= 0.45:
-        return {"state": "MARKUP", "detail": f"marking up — +{ret20*100:.0f}% in 20d", "pos": p}
+        if uptrend_ok:
+            return {"state": "MARKUP", "detail": f"marking up — +{ret20*100:.0f}% in 20d", "pos": p}
+        return {"state": "REBOUND", "detail": f"+{ret20*100:.0f}% bounce but still under the trend — unconfirmed", "pos": p}
     if ret20 <= -0.08 and pos <= 0.55:
         return {"state": "MARKDOWN", "detail": f"marking down — {ret20*100:.0f}% in 20d", "pos": p}
 
     UP, DN = 0.05, -0.05
-    if s_recent >= UP and pos >= 0.5:
+    if s_recent >= UP and pos >= 0.5 and uptrend_ok:
         return {"state": "MARKUP", "detail": "uptrend — higher highs & higher lows", "pos": p}
     if s_recent <= DN:
         return {"state": "MARKDOWN", "detail": "downtrend — lower highs & lower lows", "pos": p}
@@ -301,31 +309,49 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
     if not supports:
         return None
     support = max(supports)              # the closest support beneath price
-    stop = support - 0.4 * atr
-    # never leave the stop above the most recent lows — clamp below the 3-bar low
-    stop = min(stop, float(np.min(l[-3:])) - 0.1 * atr)
-    risk = px - stop
+    stop_now = min(support - 0.4 * atr, float(np.min(l[-3:])) - 0.1 * atr)
+    risk_now = px - stop_now
+
+    if risk_now > 0 and risk_now / px <= 0.12:
+        # tight enough to enter at market now
+        entry, stop, entry_type = px, stop_now, "now"
+    else:
+        # extended above support (a breakout that already ran) — don't suppress the
+        # plan, offer a PULLBACK-to-zone limit entry instead (the audit's ask)
+        pull = None
+        if zone and len(zone) == 2 and zone[1] and float(max(zone)) < px:
+            pull = float(max(zone))          # retest the broken base top
+        elif extra_support and extra_support < px:
+            pull = float(extra_support)
+        if pull is None:
+            return None
+        zlo = float(min(zone)) if (zone and len(zone) == 2 and zone[0]) else pull
+        entry = pull
+        stop = min(zlo, pull) - 0.4 * atr
+        entry_type = "pullback"
+        if entry <= stop or (entry - stop) / entry > 0.14:
+            return None
+
+    risk = entry - stop
     if risk <= 0:
         return None
-    if risk / px > 0.12:                  # support too far → no tight entry (book: skip wide risk)
-        return None
-
-    # target: next meaningful resistance ≥ ~1 ATR (or 4%) above, else value-area
+    # target: next meaningful resistance ≥ ~1 ATR (or 4%) above entry, else value-area
     # high, else a 2R measured move
-    floor = px + max(1.0 * atr, 0.04 * px)
+    floor = entry + max(1.0 * atr, 0.04 * entry)
     sh = sorted([float(h[i]) for i in _swing_highs(h, 3) if h[i] >= floor])
     if sh:
         target = sh[0]
     elif profile and profile.get("vah", 0) >= floor:
         target = profile["vah"]
     else:
-        target = px + 2.0 * risk
-    reward = target - px
+        target = entry + 2.0 * risk
+    reward = target - entry
     if reward <= 0:
         return None
     return {
-        "entry": round(px, 4), "stop": round(stop, 4), "target": round(target, 4),
-        "rr": round(reward / risk, 2), "risk_pct": round(risk / px * 100, 1),
+        "entry": round(entry, 4), "stop": round(stop, 4), "target": round(target, 4),
+        "rr": round(reward / risk, 2), "risk_pct": round(risk / entry * 100, 1),
+        "entry_type": entry_type,
     }
 
 
@@ -348,6 +374,7 @@ def compute(hist, zone=None):
         context = {
             "pct_off_high": round((px / hi - 1) * 100, 1) if hi else 0.0,
             "range_pos": round((px - lo) / (hi - lo), 2) if hi > lo else 0.5,  # 0=at lows, 1=at highs
+            "ret_20d": round((px / float(c[-21]) - 1) * 100, 1) if len(c) > 21 else 0.0,
         }
         return {
             "available": True,

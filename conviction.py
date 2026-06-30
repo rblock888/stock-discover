@@ -29,7 +29,7 @@ def _raw(stock, bucket):
     return _f((stock.get("breakdown", {}).get(bucket, {}) or {}).get("raw"))
 
 
-def assess(stock: dict, regime: dict | None = None) -> dict:
+def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = None) -> dict:
     coiled = stock.get("coiled") or {}
     smad = stock.get("smad") or {}
     edge = stock.get("edge") or {}
@@ -162,6 +162,17 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
     else:
         grade = "C"
 
+    # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
+    cautions = []
+    stat = (setup_stats or {}).get(setup)
+    if stat and stat.get("n", 0) >= 30:
+        ar = _f(stat.get("avg_r"))
+        if ar < -0.05:
+            cautions.append(f"weak measured edge ({ar:+.2f}R, n={stat['n']})")
+            grade = {"A": "B", "B": "C", "C": "C"}.get(grade, grade)
+        elif ar >= 0.20:
+            cautions.append(f"strong measured edge ({ar:+.2f}R, {stat.get('win_rate')}% win)")
+
     # thesis: setup + confluence + the most informative passing factor
     lead = next((f for f in factors if f["passed"] and f["group"] == "fundamental"), None) \
         or next((f for f in factors if f["passed"] and f["label"] not in ("Setup present", "Regime tailwind")), None)
@@ -171,6 +182,8 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
     if mood:
         bits.append(mood.lower().replace("-", " ") + " tape")
     thesis = " · ".join(b for b in bits if b)
+    if cautions:
+        thesis += " — " + cautions[0]
 
     if plan:
         action = f"Buy ${plan['entry']}, stop ${plan['stop']}, target ${plan['target']} ({plan['rr']}R)"
@@ -182,5 +195,5 @@ def assess(stock: dict, regime: dict | None = None) -> dict:
 
     return {
         "grade": grade, "score": round(score), "setup": setup, "thesis": thesis, "action": action,
-        "confluence": confluence, "plan": plan, "positives": positives, "cautions": [],
+        "confluence": confluence, "plan": plan, "positives": positives, "cautions": cautions,
     }

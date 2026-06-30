@@ -160,11 +160,12 @@ def _run_full_pipeline():
         regime_now = market_regime.get_cached()
         regime_label = (regime_now.get("mood") or {}).get("label") if regime_now.get("available") else None
         ranked_list = [{"ticker": t, **r} for t, r in results.items()]
+        setup_stats = _setup_stats_map()  # measured edge per setup type (prior backtest)
         for r in ranked_list:
             tilt = regime_tilt.compute_tilt(r, regime_now)
             r["tilt"] = tilt
             r["rank_score"] = round(r["composite"] * tilt["factor"], 1)
-            r["setup"] = conviction.assess(r, regime_now)  # single graded verdict
+            r["setup"] = conviction.assess(r, regime_now, setup_stats=setup_stats)  # graded verdict
         ranked_list.sort(key=lambda x: x["rank_score"], reverse=True)
         alerts = [r["ticker"] for r in ranked_list if r["multi_signal_alert"]]
 

@@ -395,6 +395,26 @@ def test_conviction_grades_a_on_full_confluence():
     assert "Buy $4.2" in v["action"] and "2.3R" in v["action"]
 
 
+def test_conviction_demotes_negative_expectancy_setup():
+    """A setup the historical backtest says loses money gets demoted (loop closed)."""
+    stock = {
+        "composite": 64, "calibrated_p_win": 0.42, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}, "catalyst": {"raw": 70}, "insider": {"raw": 58}},
+        "tilt": {"factor": 1.12}, "short_squeeze": {"score": 66},
+        "smad": {"available": True, "state": "BOS IMPULSE", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "MARKUP"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    good = conviction.assess(stock, _RISK_ON, setup_stats={"Breakout (structure)": {"avg_r": 0.4, "win_rate": 55, "n": 80}})
+    bad = conviction.assess(stock, _RISK_ON, setup_stats={"Breakout (structure)": {"avg_r": -0.3, "win_rate": 30, "n": 80}})
+    assert good["grade"] == "A"
+    assert bad["grade"] != "A"          # demoted by the measured negative edge
+    assert any("weak measured edge" in c for c in bad["cautions"])
+
+
 def test_conviction_b_without_fundamentals():
     """A technical setup with no fundamental backing can't grade A — the books' rule."""
     stock = {

@@ -34,6 +34,13 @@ BUCKETS = ["fundamentals", "momentum", "catalyst", "insider", "sentiment"]
 # Minimum sample before a measured result is trusted (vs "accruing")
 MIN_N_EVIDENCE = 120
 MIN_N_TILT = 80
+MIN_N_GRADE = 120                # 5-way categorical split, same power bar as evidence_weights
+MIN_N_GRADE_PER_BUCKET = 10      # below this a grade's own row is flagged low_n, not hidden
+
+# AVOID worst -> A best. "—" (no setup detected) is excluded from this ladder —
+# it's a different population ("nothing to grade"), not a neutral midpoint.
+GRADE_ORDER = ["AVOID", "WATCH", "C", "B", "A"]
+GRADE_ORDINAL = {"AVOID": 0, "WATCH": 1, "C": 2, "B": 3, "A": 4}
 
 _cache = {"scorecard": None, "calibration": {}, "last_run": None, "coverage": None}
 
@@ -408,6 +415,95 @@ def tilt_ab(horizon: int = 5) -> dict:
     }
 
 
+def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray) -> list:
+    """Per-grade breakdown: n / avg_return_pct / win_rate / beat_spy_rate. Mirrors
+    _decile_table()'s shape but bins by discrete grade instead of score decile,
+    since conviction grade is ordinal/categorical, not continuous."""
+    out = []
+    for g in GRADE_ORDER + ["—"]:
+        m = grades == g
+        n = int(m.sum())
+        if n == 0:
+            continue
+        rt, ex = rets[m], excess[m]
+        out.append({
+            "grade": g, "n": n, "low_n": n < MIN_N_GRADE_PER_BUCKET,
+            "avg_return_pct": round(float(rt.mean()) * 100, 2),
+            "avg_excess_pct": round(float(ex.mean()) * 100, 2) if not np.isnan(ex).all() else None,
+            "win_rate": round(float((rt >= WIN_THRESHOLD).mean()) * 100, 1),
+            "beat_spy_rate": round(float((ex > 0).mean()) * 100, 1) if not np.isnan(ex).all() else None,
+        })
+    return out
+
+
+def grade_scorecard(horizon: int = 20) -> dict:
+    """Does the conviction GRADE (A/B/C/WATCH/AVOID) predict forward returns?
+
+    Grade is the newest, most heavily-used signal (it leads the whole Overview)
+    but was the one signal never wired into this closed loop. Only NEW snapshots
+    (setup_grade persisted from the scan onward) carry a value — historical rows
+    have setup_grade IS NULL and are excluded, so this accrues from zero on
+    deploy day regardless of how much snapshot history already exists. Not
+    backfill-able: reconstructing a historical grade needs the full stock-dict
+    shape (edge/coiled/smad/book/breakdown/quote/etc), which was never
+    persisted — only a few derived scalar columns were.
+    """
+    rets = db.get_snapshot_returns(horizon)
+    feats = _feature_lookup()
+    rows = []
+    for r in rets:
+        f = feats.get((r["ticker"], r["snap_day"]))
+        if not f or not f.get("setup_grade"):
+            continue
+        rows.append((f["setup_grade"], r["fwd_return"], r["excess_return"]))
+
+    n = len(rows)
+    if n < MIN_N_GRADE:
+        return {"available": False, "status": "accruing", "n": n, "need": MIN_N_GRADE,
+                "horizon": horizon,
+                "detail": f"setup_grade persists from new scans only (pre-existing snapshots "
+                          f"have no grade recorded and are excluded) — {n}/{MIN_N_GRADE} resolved."}
+
+    grades = np.array([r[0] for r in rows], dtype=object)
+    fwd = np.array([r[1] for r in rows], dtype=float)
+    excess = np.array([r[2] if r[2] is not None else np.nan for r in rows], dtype=float)
+
+    ranked_mask = np.array([g in GRADE_ORDINAL for g in grades])
+    ordinal = np.array([GRADE_ORDINAL[g] for g in grades[ranked_mask]], dtype=float)
+    grade_ic = _spearman(ordinal, fwd[ranked_mask])
+
+    table = _grade_table(grades, fwd, excess)
+    by_grade = {row["grade"]: row for row in table}
+
+    # Inversion check — a WORSE grade showing a HIGHER forward excess return than
+    # a BETTER grade, the same failure mode that made ml_score's confidence hollow.
+    inversion = None
+    present = [g for g in GRADE_ORDER if g in by_grade and not by_grade[g]["low_n"]]
+    for i in range(len(present) - 1):
+        worse, better = present[i], present[i + 1]
+        wr, br = by_grade[worse]["avg_excess_pct"], by_grade[better]["avg_excess_pct"]
+        if wr is not None and br is not None and wr > br:
+            inversion = {"worse_grade": worse, "better_grade": better,
+                         "worse_avg_excess_pct": wr, "better_avg_excess_pct": br,
+                         "detail": f"{worse} outperformed {better} on excess return."}
+            break
+
+    a_row, avoid_row = by_grade.get("A"), by_grade.get("AVOID")
+    avoid_beats_a = bool(
+        a_row and avoid_row and not a_row["low_n"] and not avoid_row["low_n"]
+        and avoid_row["avg_excess_pct"] is not None and a_row["avg_excess_pct"] is not None
+        and avoid_row["avg_excess_pct"] > a_row["avg_excess_pct"]
+    )
+
+    return {
+        "available": True, "status": "ready", "n": n, "horizon": horizon,
+        "grade_ic": round(grade_ic, 3), "grades": table,
+        "inversion": inversion, "avoid_outperforms_a": avoid_beats_a,
+        "detail": "Ordinal grade rank (AVOID=0..A=4) Spearman-correlated against forward return; "
+                  "'—' shown separately, excluded from the correlation.",
+    }
+
+
 def refresh(horizons=None) -> dict:
     """Recompute forward returns + scorecard + calibration. Never raises."""
     try:
@@ -420,6 +516,7 @@ def refresh(horizons=None) -> dict:
         # Tuning analyses (auto-activate as the per-bucket / tilt data matures)
         _cache["evidence_weights"] = evidence_weights(5)
         _cache["tilt_ab"] = tilt_ab(5)
+        _cache["grade_scorecard"] = {h: grade_scorecard(h) for h in (horizons or HORIZONS)}
         return {"coverage": cov, "scorecards": cards}
     except Exception as e:
         logger.error(f"evaluation.refresh failed: {e}")
@@ -457,4 +554,5 @@ def get_cached() -> dict:
         "calibration": {f"{k[0]}@{k[1]}": v for k, v in _cache.get("calibration", {}).items()},
         "evidence_weights": _cache.get("evidence_weights") or evidence_weights(5),
         "tilt_ab": _cache.get("tilt_ab") or tilt_ab(5),
+        "grade_scorecard": _cache.get("grade_scorecard") or {h: grade_scorecard(h) for h in HORIZONS},
     }

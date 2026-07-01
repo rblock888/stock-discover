@@ -38,7 +38,8 @@ def init_db():
         existing = {r[1] for r in c.execute("PRAGMA table_info(scan_snapshots)").fetchall()}
         for col, decl in (("tilt_factor", "REAL"), ("regime_label", "TEXT"),
                           ("rank_score", "REAL"), ("bucket_scores", "TEXT"),
-                          ("coiled_score", "REAL"), ("smad_score", "REAL"), ("smad_state", "TEXT")):
+                          ("coiled_score", "REAL"), ("smad_score", "REAL"), ("smad_state", "TEXT"),
+                          ("setup_grade", "TEXT"), ("setup_score", "REAL"), ("setup_type", "TEXT")):
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_snapshots ADD COLUMN {col} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_date ON scan_snapshots(scan_date)")
@@ -143,13 +144,14 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
             }) if bd else None
             coiled = (stock.get("coiled") or {}).get("coiled_score")
             smad_obj = stock.get("smad") or {}
+            verdict = stock.get("setup") or {}   # conviction.assess() output
             try:
                 c.execute("""
                     INSERT OR IGNORE INTO scan_snapshots
                     (ticker, scan_date, price, composite_score, ml_score, early_score,
                      is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores,
-                     coiled_score, smad_score, smad_state)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     coiled_score, smad_score, smad_state, setup_grade, setup_score, setup_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     ticker,
                     scan_date,
@@ -166,6 +168,9 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                     coiled,
                     smad_obj.get("smad_score"),
                     smad_obj.get("state"),
+                    verdict.get("grade"),
+                    verdict.get("score"),
+                    verdict.get("setup"),
                 ))
             except Exception:
                 continue
@@ -198,10 +203,11 @@ def get_all_snapshots() -> list:
 
 
 def get_snapshot_features() -> list:
-    """Per-snapshot scoring features for evidence/A-B analysis (joins to returns)."""
+    """Per-snapshot scoring features for evidence/A-B/grade analysis (joins to returns)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT ticker, scan_date, composite_score, tilt_factor, rank_score, bucket_scores, coiled_score "
+            "SELECT ticker, scan_date, composite_score, tilt_factor, rank_score, bucket_scores, "
+            "coiled_score, setup_grade, setup_score, setup_type "
             "FROM scan_snapshots ORDER BY scan_date ASC"
         ).fetchall()
         return [dict(r) for r in rows]

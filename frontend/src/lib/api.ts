@@ -728,6 +728,37 @@ export interface TiltAB {
   detail: string;
 }
 
+export interface GradeRow {
+  grade: "A" | "B" | "C" | "WATCH" | "AVOID" | "—";
+  n: number;
+  low_n: boolean;
+  avg_return_pct: number;
+  avg_excess_pct: number | null;
+  win_rate: number;
+  beat_spy_rate: number | null;
+}
+
+export interface GradeInversion {
+  worse_grade: string;
+  better_grade: string;
+  worse_avg_excess_pct: number;
+  better_avg_excess_pct: number;
+  detail: string;
+}
+
+export interface GradeScorecard {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  need?: number;
+  horizon: number;
+  grade_ic?: number;
+  grades?: GradeRow[];
+  inversion?: GradeInversion | null;
+  avoid_outperforms_a?: boolean;
+  detail: string;
+}
+
 export interface ScorecardResponse {
   scorecards: Record<string, Scorecard> | null;
   data_status: DataStatus;
@@ -735,6 +766,7 @@ export interface ScorecardResponse {
   calibration: Record<string, CalibrationCurve>;
   evidence_weights?: EvidenceWeights;
   tilt_ab?: TiltAB;
+  grade_scorecard?: Record<string, GradeScorecard>;
 }
 
 export async function getScorecard(): Promise<ScorecardResponse> {

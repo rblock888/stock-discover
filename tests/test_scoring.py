@@ -193,6 +193,88 @@ def test_entry_exit_horizon_and_out_of_range():
     assert evaluation._entry_exit(days, closes, "2024-01-09", 5) == (None, None)  # past the end
 
 
+# ── evaluation: grade_scorecard — does conviction grade predict returns? ─────
+
+import db
+
+
+def _fake_snapshot_returns_and_features(monkeypatch, grade_return_pairs, horizon=20):
+    """Wire db.get_snapshot_returns/get_snapshot_features to synthetic data so
+    grade_scorecard() can be tested without touching sqlite."""
+    rets, feats = [], []
+    for i, (grade, ret) in enumerate(grade_return_pairs):
+        ticker, day = f"T{i}", f"2024-01-{(i % 28) + 1:02d}"
+        rets.append({"ticker": ticker, "snap_day": day, "horizon": horizon,
+                     "fwd_return": ret, "excess_return": ret - 0.01})
+        feats.append({"ticker": ticker, "scan_date": day, "setup_grade": grade,
+                      "setup_score": None, "setup_type": None, "composite_score": None,
+                      "tilt_factor": None, "rank_score": None, "bucket_scores": None,
+                      "coiled_score": None})
+    monkeypatch.setattr(db, "get_snapshot_returns", lambda h=None: rets if h == horizon else [])
+    monkeypatch.setattr(db, "get_snapshot_features", lambda: feats)
+
+
+def test_grade_scorecard_accrues_below_min_n(monkeypatch):
+    pairs = [("A", 0.15)] * 10  # well under MIN_N_GRADE=120
+    _fake_snapshot_returns_and_features(monkeypatch, pairs)
+    out = evaluation.grade_scorecard(horizon=20)
+    assert out["status"] == "accruing"
+    assert out["available"] is False
+    assert out["n"] == 10
+
+
+def test_grade_scorecard_detects_clean_signal(monkeypatch):
+    """A > B > C > AVOID on forward returns → positive grade_ic, no inversion."""
+    pairs = (
+        [("A", 0.30)] * 30 + [("B", 0.12)] * 30 +
+        [("C", 0.02)] * 30 + [("AVOID", -0.15)] * 30
+    )
+    _fake_snapshot_returns_and_features(monkeypatch, pairs)
+    out = evaluation.grade_scorecard(horizon=20)
+    assert out["status"] == "ready"
+    assert out["grade_ic"] > 0.5
+    assert out["inversion"] is None
+    assert out["avoid_outperforms_a"] is False
+    by_grade = {g["grade"]: g for g in out["grades"]}
+    assert by_grade["A"]["avg_return_pct"] > by_grade["AVOID"]["avg_return_pct"]
+
+
+def test_grade_scorecard_detects_inversion(monkeypatch):
+    """AVOID outperforming A → inversion flagged, mirroring the ml_score no-edge finding."""
+    pairs = (
+        [("A", -0.10)] * 30 + [("B", 0.02)] * 30 +
+        [("C", 0.05)] * 30 + [("AVOID", 0.25)] * 30
+    )
+    _fake_snapshot_returns_and_features(monkeypatch, pairs)
+    out = evaluation.grade_scorecard(horizon=20)
+    assert out["status"] == "ready"
+    assert out["grade_ic"] < 0
+    assert out["avoid_outperforms_a"] is True
+    assert out["inversion"] is not None
+
+
+def test_grade_scorecard_excludes_no_setup_from_correlation(monkeypatch):
+    """'—' rows show up in the per-grade table but must not pollute grade_ic."""
+    pairs = (
+        [("A", 0.30)] * 30 + [("B", 0.12)] * 30 +
+        [("C", 0.02)] * 30 + [("AVOID", -0.15)] * 30 + [("—", 0.50)] * 20
+    )
+    _fake_snapshot_returns_and_features(monkeypatch, pairs)
+    out = evaluation.grade_scorecard(horizon=20)
+    by_grade = {g["grade"]: g for g in out["grades"]}
+    assert "—" in by_grade
+    assert out["grade_ic"] > 0.5
+
+
+def test_grade_scorecard_flags_low_n_per_grade(monkeypatch):
+    pairs = [("A", 0.20)] * 115 + [("AVOID", -0.10)] * 8  # AVOID under the per-bucket floor
+    _fake_snapshot_returns_and_features(monkeypatch, pairs)
+    out = evaluation.grade_scorecard(horizon=20)
+    by_grade = {g["grade"]: g for g in out["grades"]}
+    assert by_grade["AVOID"]["low_n"] is True
+    assert by_grade["A"]["low_n"] is False
+
+
 # ── momentum: SPY-relative strength ──────────────────────────────────────────
 
 import momentum

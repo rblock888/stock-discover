@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   CalibrationCurve,
   EvidenceWeights,
+  GradeScorecard,
   Scorecard,
   ScorecardResponse,
   SignalCard,
@@ -148,6 +149,7 @@ export function ScorecardPanel() {
   const ds = data?.data_status;
   const ew = data?.evidence_weights;
   const ab = data?.tilt_ab;
+  const gc = data?.grade_scorecard?.[String(horizon)];
   const cards = data?.scorecards ?? {};
   const available = Object.entries(cards).filter(([, c]) => c.available).map(([h]) => Number(h)).sort((a, b) => a - b);
   const active: Scorecard | undefined = cards[String(horizon)];
@@ -222,7 +224,7 @@ export function ScorecardPanel() {
           </div>
 
           {/* Signal tuning — auto-activates as per-bucket + tilt data matures */}
-          {(ew || ab) && (
+          {(ew || ab || gc) && (
             <div className="mb-4">
               <div className="text-[10px] uppercase tracking-[0.1em] font-bold mb-2" style={{ color: "var(--text-muted)" }}>
                 Signal tuning · self-activating as data accrues
@@ -230,6 +232,7 @@ export function ScorecardPanel() {
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                 {ew && <EvidenceWeightsCard ew={ew} />}
                 {ab && <TiltABCard ab={ab} />}
+                {gc && <GradeAccuracyCard gc={gc} />}
               </div>
             </div>
           )}
@@ -350,6 +353,67 @@ function TiltABCard({ ab }: { ab: TiltAB }) {
           <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
             top-quartile return: base {ab.top_quartile_base_pct}% vs tilted {ab.top_quartile_tilt_pct}%
           </div>
+        </div>
+      )}
+    </TuningCard>
+  );
+}
+
+const GRADE_DISPLAY_ORDER = ["A", "B", "C", "WATCH", "AVOID", "—"];
+const GRADE_ROW_COLOR: Record<string, string> = {
+  A: "var(--green)", B: "var(--accent-bright)", C: "var(--amber)",
+  WATCH: "var(--text-muted)", AVOID: "var(--red)", "—": "var(--text-muted)",
+};
+
+function GradeAccuracyCard({ gc }: { gc: GradeScorecard }) {
+  return (
+    <TuningCard title="Grade accuracy — does conviction predict returns?" status={gc.status}>
+      {gc.status === "accruing" ? (
+        <>
+          <p className="text-[10px] mb-2" style={{ color: "var(--text-muted)" }}>{gc.detail}</p>
+          <AccrualBar n={gc.n} need={gc.need ?? 120} />
+        </>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>grade IC</span>
+            <span className="text-[13px] font-bold tabular-nums" style={{ fontFamily: "var(--font-mono)", color: (gc.grade_ic ?? 0) >= 0.04 ? "var(--green)" : "var(--red)" }}>
+              {(gc.grade_ic ?? 0) >= 0 ? "+" : ""}{gc.grade_ic?.toFixed(2)}
+            </span>
+            <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>(AVOID=0 → A=4, n={gc.n})</span>
+          </div>
+
+          {gc.inversion && (
+            <div className="text-[10px] px-2 py-1.5 rounded-md" style={{ backgroundColor: "var(--red-dim)", color: "var(--red)" }}>
+              Inversion: {gc.inversion.detail}
+            </div>
+          )}
+          {gc.avoid_outperforms_a && !gc.inversion && (
+            <div className="text-[10px] px-2 py-1.5 rounded-md" style={{ backgroundColor: "var(--red-dim)", color: "var(--red)" }}>
+              AVOID-graded picks outperformed A-graded picks on excess return.
+            </div>
+          )}
+
+          <div className="grid grid-cols-[54px_1fr_40px_34px] gap-2 text-[9px] uppercase tracking-[0.05em]" style={{ color: "var(--text-muted)" }}>
+            <span>grade</span><span>avg return</span><span className="text-right">win%</span><span className="text-right">n</span>
+          </div>
+          {GRADE_DISPLAY_ORDER.map((g) => {
+            const row = gc.grades?.find((r) => r.grade === g);
+            if (!row) return null;
+            const color = GRADE_ROW_COLOR[g] ?? "var(--text-secondary)";
+            const maxAbs = Math.max(1, ...(gc.grades ?? []).map((r) => Math.abs(r.avg_return_pct)));
+            return (
+              <div key={g} className="grid grid-cols-[54px_1fr_40px_34px] gap-2 items-center text-[10px]" style={{ opacity: row.low_n ? 0.5 : 1 }}>
+                <span className="font-bold" style={{ color }}>{g}</span>
+                <div className="h-[7px] rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.06)" }}>
+                  <div className="h-full rounded-full" style={{ width: `${(Math.abs(row.avg_return_pct) / maxAbs) * 100}%`, background: row.avg_return_pct >= 0 ? "var(--green)" : "var(--red)" }} />
+                </div>
+                <span className="text-right tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>{row.win_rate.toFixed(0)}%</span>
+                <span className="text-right tabular-nums" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{row.n}{row.low_n ? "*" : ""}</span>
+              </div>
+            );
+          })}
+          <div className="text-[9px]" style={{ color: "var(--text-muted)" }}>* fewer than 10 resolved picks — noisy</div>
         </div>
       )}
     </TuningCard>

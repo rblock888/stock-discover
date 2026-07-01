@@ -167,6 +167,9 @@ def from_finviz_microcap(max_tickers: int = 80) -> list:
             "v": "111",
             "f": "cap_microover,cap_smallunder,sh_avgvol_o200,sh_price_u30,fa_salesqoq_pos,ta_sma200_pb50,ta_highlow52w_a20h",
             "ft": "4",
+            "o": "-volume",   # without an explicit sort Finviz defaults to ticker-
+                              # alphabetical, which silently locks the universe to
+                              # A/B-name tickers once paginated results are capped
             "r": "1",
         }
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Accept": "text/html"}
@@ -177,6 +180,49 @@ def from_finviz_microcap(max_tickers: int = 80) -> list:
             if resp.status_code != 200:
                 break
             # Finviz moved from quote.ashx?t= to stock?t= links (2026) — match both
+            matches = re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text)
+            unique = []
+            for m in matches:
+                if m not in tickers and m not in unique:
+                    unique.append(m)
+            tickers.extend(unique)
+            if len(unique) < 10:
+                break
+            time.sleep(0.5)
+    except Exception:
+        pass
+    return list(dict.fromkeys(tickers))[:max_tickers]
+
+
+def from_finviz_basing(max_tickers: int = 60) -> list:
+    """
+    Quiet-base hunter — the opposite bias from gainers/most-active. Targets
+    names sitting ABOVE their 20/50-day average (not a downtrend) but well OFF
+    their 52-week high (not extended) — the coiling-before-the-move zone that
+    momentum screens structurally can't see (a basing stock isn't moving yet,
+    so it never shows up in "day gainers" or "most active").
+    """
+    tickers = []
+    try:
+        url = "https://finviz.com/screener.ashx"
+        params = {
+            "v": "111",
+            # cap_microover + cap_smallunder bounds this to micro-to-small cap (matches
+            # from_finviz_microcap's proven pattern) — cap_smallover alone has NO upper
+            # bound and would flood the basing scan with mega-cap ADRs (Novo Nordisk,
+            # UBS, CSX...) that happen to look "calm" simply because they're huge.
+            "f": "cap_microover,cap_smallunder,sh_avgvol_o100,sh_price_u50,ta_sma20_pa,ta_sma50_pa,ta_highlow52w_b30to50",
+            "ft": "4",
+            "o": "-marketcap",
+            "r": "1",
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Accept": "text/html"}
+
+        for start in range(1, max_tickers + 1, 20):
+            params["r"] = str(start)
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                break
             matches = re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text)
             unique = []
             for m in matches:
@@ -206,6 +252,9 @@ def from_finviz(max_tickers: int = 100) -> list:
             "v": "111",  # overview view
             "f": "cap_smallover,sh_avgvol_o100,sh_price_u50,fa_salesqoq_poslow",
             "ft": "4",   # all filters
+            "o": "-change",  # diversify vs the other finviz sources' sort keys —
+                             # else all three default to ticker-alphabetical and
+                             # only ever surface A/B-name tickers once paginated
             "r": "1",    # starting row
         }
         headers = {
@@ -521,6 +570,65 @@ def from_stocktwits(max_tickers: int = 30) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Pre-fly re-rank — bias the scored top-N toward BASING/COILED, not just attention
+# ---------------------------------------------------------------------------
+
+# how strongly each pre-breakout state should compete for a scoring slot —
+# COILED/BASING (the pre-fly setups) score highest; BREAKING is already moving
+# (momentum sources already surface these); EXTENDED is actively de-prioritized
+# (that's the "already flew" chart this whole engine exists to avoid chasing)
+_PREFLY_STATE_WEIGHT = {
+    "COILED": 1.00, "BASING": 0.80, "NO SETUP": 0.35, "BREAKING": 0.55, "EXTENDED": 0.05,
+}
+
+
+def _prefly_rerank(tickers: list, source_counts: dict, limit: int = 130) -> list:
+    """Re-rank discovery candidates so a quiet, coiling microcap that only one
+    source mentions can out-rank a hyped, already-extended gainer for a scoring
+    slot. Discovery sources (gainers/most-active/reddit/rss) are structurally
+    attention-biased — a stock that hasn't moved yet never shows up in them, so
+    pure source-count ordering silently locks pre-fly candidates out of the top
+    40 that actually get scored. This blends attention with a real technical
+    read using the already-measured coiled-spring detector on real OHLCV.
+
+    Never raises; on any failure returns the input order unchanged.
+    """
+    head = tickers[:limit]
+    if not head:
+        return tickers
+    try:
+        import price_history
+        import pre_breakout
+        histories = price_history.get_histories(head, period="1y")
+    except Exception:
+        return tickers
+
+    max_src = max(source_counts.values()) if source_counts else 1
+    scored = []
+    for t in head:
+        attention = source_counts.get(t, 1) / max_src  # 0..1, popularity proxy
+        prefly = 0.0
+        hist = histories.get(t)
+        if hist is not None and len(hist) >= 120:
+            try:
+                cb = pre_breakout.compute(t, hist)
+                if cb.get("available"):
+                    weight = _PREFLY_STATE_WEIGHT.get(cb.get("state"), 0.3)
+                    prefly = (cb.get("coiled_score", 0) / 100.0) * weight
+            except Exception:
+                prefly = 0.0
+        # lean toward the technical read (0.55) — attention still counts (0.45)
+        # so a genuinely hot multi-source catalyst can still surface.
+        scored.append((t, 0.45 * attention + 0.55 * prefly))
+
+    scored.sort(key=lambda x: -x[1])
+    reranked = [t for t, _ in scored]
+    seen = set(head)
+    tail = [t for t in tickers if t not in seen]
+    return reranked + tail
+
+
+# ---------------------------------------------------------------------------
 # Main: combine all sources into a deduplicated universe
 # ---------------------------------------------------------------------------
 
@@ -556,6 +664,7 @@ def build_universe(
         if use_finviz:
             futures[pool.submit(from_finviz)] = "finviz"
             futures[pool.submit(from_finviz_microcap)] = "finviz_microcap"
+            futures[pool.submit(from_finviz_basing)] = "finviz_basing"
 
         if use_reddit:
             futures[pool.submit(from_reddit)] = "reddit"
@@ -600,7 +709,12 @@ def build_universe(
 
     # Ground-truth validation: drop anything that doesn't resolve to real price
     # data (one batched fetch over the top candidates that would actually score).
-    all_tickers = _validate_with_prices(all_tickers, limit=90)
+    all_tickers = _validate_with_prices(all_tickers, limit=130)
+
+    # Re-rank toward pre-fly (basing/coiled) setups instead of pure attention —
+    # otherwise the top-40 that actually get scored is always whatever's already
+    # hyped/extended, which is the opposite of "catch it before it flies".
+    all_tickers = _prefly_rerank(all_tickers, ticker_source_count, limit=130)
 
     return {
         "tickers": all_tickers,

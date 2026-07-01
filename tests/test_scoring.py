@@ -228,6 +228,61 @@ def test_real_tickers_kept(real):
     assert universe_builder._looks_like_ticker(real)
 
 
+def test_prefly_rerank_favors_coiled_over_hyped_extended(monkeypatch):
+    """A quiet coiling name mentioned by 1 source should out-rank an already-
+    extended gainer mentioned by 5 sources — the whole point of the re-rank."""
+    import pre_breakout as pb
+
+    idx = pd.date_range("2024-01-01", periods=150, freq="B")
+    quiet_hist = pd.DataFrame({"Close": np.full(150, 10.0), "High": np.full(150, 10.1),
+                               "Low": np.full(150, 9.9), "Volume": np.full(150, 5e5)}, index=idx)
+    hyped_hist = pd.DataFrame({"Close": np.full(150, 50.0), "High": np.full(150, 50.5),
+                               "Low": np.full(150, 49.5), "Volume": np.full(150, 5e6)}, index=idx)
+
+    def fake_get_histories(symbols, period="1y", max_age=None):
+        return {"QUIET": quiet_hist, "HYPED": hyped_hist}
+
+    def fake_compute(ticker, hist):
+        if ticker == "QUIET":
+            return {"available": True, "state": "COILED", "coiled_score": 82}
+        return {"available": True, "state": "EXTENDED", "coiled_score": 20}
+
+    monkeypatch.setattr("price_history.get_histories", fake_get_histories)
+    monkeypatch.setattr(pb, "compute", fake_compute)
+
+    tickers = ["HYPED", "QUIET"]  # HYPED first by attention
+    source_counts = {"HYPED": 5, "QUIET": 1}
+    out = universe_builder._prefly_rerank(tickers, source_counts, limit=10)
+    assert out.index("QUIET") < out.index("HYPED")
+
+
+def test_prefly_rerank_never_raises_on_failure(monkeypatch):
+    monkeypatch.setattr("price_history.get_histories", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = universe_builder._prefly_rerank(["A", "B"], {"A": 1, "B": 1}, limit=10)
+    assert out == ["A", "B"]  # unchanged, no crash
+
+
+# ── api: discovery-quality gates (mega-cap / closed-end fund exclusion) ──────
+
+import api
+
+
+def test_is_mega_cap():
+    assert api._is_mega_cap({"market_cap": 300_000_000_000}) is True   # Novo Nordisk-scale
+    assert api._is_mega_cap({"market_cap": 20_000_000_000}) is False   # SOFI-scale, allowed
+    assert api._is_mega_cap({}) is False
+
+
+def test_is_fund_or_trust():
+    # closed-end fund: Asset Management industry, no employees (no operating business)
+    assert api._is_fund_or_trust({"industry": "Asset Management", "employees": None}) is True
+    assert api._is_fund_or_trust({"industry": "Asset Management", "employees": 0}) is True
+    # a real asset-management COMPANY (e.g. Franklin Resources) has employees
+    assert api._is_fund_or_trust({"industry": "Asset Management", "employees": 9000}) is False
+    assert api._is_fund_or_trust({"industry": "Biotechnology", "employees": None}) is False
+    assert api._is_fund_or_trust({}) is False
+
+
 # ── pre_breakout: catch coils, flag the already-flown ────────────────────────
 
 import pre_breakout

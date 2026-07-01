@@ -150,6 +150,13 @@ def _run_full_pipeline():
         for i, ticker in enumerate(to_score):
             try:
                 result = _score_ticker(ticker)
+                quote = result.get("quote") or {}
+                if _is_mega_cap(quote):
+                    logger.info(f"  Skipped {ticker}: mega-cap (${_num(quote.get('market_cap'))/1e9:.0f}B)")
+                    continue
+                if _is_fund_or_trust(quote):
+                    logger.info(f"  Skipped {ticker}: closed-end fund/trust, not an operating company")
+                    continue
                 results[ticker] = result
                 logger.info(f"  Scored {i+1}/{len(to_score)}: {ticker} = {result['composite']:.1f}")
             except Exception as e:
@@ -439,6 +446,22 @@ def _num(x, default=0.0) -> float:
         return default
 
 
+def _is_mega_cap(quote: dict) -> bool:
+    """This app hunts small/mid-cap movers — discovery has no upper cap-size bound,
+    so a calm blue-chip ADR can slip in and read as a clean 'base' purely because
+    it's huge, not because it's coiling."""
+    return _num((quote or {}).get("market_cap", 0)) > config.MAX_MARKET_CAP
+
+
+def _is_fund_or_trust(quote: dict) -> bool:
+    """Closed-end funds / municipal bond trusts (ETG, GAB, NUV...) trade like
+    stocks and yfinance tags them quoteType=EQUITY, so they slip past every other
+    filter — but a fund has no employees (no operating business) and no 'coiled
+    spring before it flies' story to tell."""
+    q = quote or {}
+    return q.get("industry") == "Asset Management" and not q.get("employees")
+
+
 def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     """Score a single ticker across all buckets."""
     # Per-call weights — never mutate the global config.WEIGHTS (it races
@@ -484,6 +507,7 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 "year_low": q.get("yearLow", 0),
                 "sector": q.get("sector", ""),
                 "industry": q.get("industry", ""),
+                "employees": q.get("fullTimeEmployees"),
                 "name": q.get("name", ticker),
                 "description": desc,
             }
@@ -508,6 +532,7 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 "year_low": _num(info.get("fiftyTwoWeekLow", 0)),
                 "sector": info.get("sector", ""),
                 "industry": info.get("industry", ""),
+                "employees": info.get("fullTimeEmployees"),
                 "name": info.get("shortName", ticker) or info.get("longName", ticker),
                 "description": desc,
             }
@@ -608,6 +633,8 @@ def _filter_ticker(ticker: str) -> dict:
             return {"ticker": ticker, "passed": False, "reason": f"Volume {avg_vol:,.0f}"}
         if mcap < config.MIN_MARKET_CAP:
             return {"ticker": ticker, "passed": False, "reason": f"MCap ${mcap/1e6:.0f}M"}
+        if mcap > config.MAX_MARKET_CAP:
+            return {"ticker": ticker, "passed": False, "reason": f"MCap ${mcap/1e9:.0f}B (mega-cap)"}
         return {"ticker": ticker, "passed": True, "reason": "OK"}
     except Exception:
         return {"ticker": ticker, "passed": False, "reason": "Error fetching data"}

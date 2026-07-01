@@ -14,6 +14,9 @@ MIN_PRICE = 0.50
 MAX_PRICE = 50.00
 MIN_AVG_VOLUME = 100_000  # 20-day average
 MIN_MARKET_CAP = 30_000_000  # $30M — allow true micro-caps for LWLG-style setups
+MAX_MARKET_CAP = 50_000_000_000  # $50B — this app hunts small/mid-cap movers, not
+                                   # mega-cap blue chips; generous enough to keep
+                                   # existing growth names (RBLX/SOFI/GRAB-scale)
 
 # --- Fundamentals thresholds ---
 REVENUE_GROWTH_STRONG = 0.20  # 20% YoY = max score

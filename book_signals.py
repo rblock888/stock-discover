@@ -103,8 +103,11 @@ def _double_bottom(h, l, c, atr):
     px = float(c[-1])
     if px < L2:
         return {"active": False}
+    # confirmed needs the close to be HOLDING above the neckline, not a single-bar
+    # poke that flickers on the next tick down
+    confirmed = bool(px > neck * 0.99) and int(np.sum(c[-3:] > neck * 0.99)) >= 2
     return {"active": True, "low": round((L1 + L2) / 2, 4), "neckline": round(neck, 4),
-            "confirmed": bool(px > neck * 0.99)}
+            "confirmed": confirmed}
 
 
 def _reverse_hns(h, l, c, atr):
@@ -126,7 +129,8 @@ def _reverse_hns(h, l, c, atr):
     px = float(c[-1])
     if px < Ld:
         return {"active": False}
-    return {"active": True, "neckline": round(neck, 4), "confirmed": bool(px > neck * 0.99)}
+    confirmed = bool(px > neck * 0.99) and int(np.sum(c[-3:] > neck * 0.99)) >= 2
+    return {"active": True, "neckline": round(neck, 4), "confirmed": confirmed}
 
 
 def _market_phase(c, h, l, atr):
@@ -378,6 +382,7 @@ def compute(hist, zone=None):
             "pct_off_high": round((px / hi - 1) * 100, 1) if hi else 0.0,
             "range_pos": round((px - lo) / (hi - lo), 2) if hi > lo else 0.5,  # 0=at lows, 1=at highs
             "ret_20d": round((px / float(c[-21]) - 1) * 100, 1) if len(c) > 21 else 0.0,
+            "ret_60d": round((px / float(c[-61]) - 1) * 100, 1) if len(c) > 61 else 0.0,
         }
         return {
             "available": True,

@@ -70,13 +70,16 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         setup, base_action = "Breakout", "Entry on the break / first pullback"
     elif sstate == "BOS IMPULSE":
         setup, base_action = "Breakout (structure)", "Long the impulse / pullback to the zone"
-    elif rhs.get("confirmed"):
+    elif rhs.get("confirmed") and phase != "MARKUP":
         setup, base_action = "Reverse H&S", "Long the neckline break; stop below the right shoulder"
-    elif dbl.get("confirmed"):
+    elif dbl.get("confirmed") and phase != "MARKUP":
         setup, base_action = "Double bottom", "Long the neckline break; stop below the second low"
     elif rbs.get("active"):
         setup, base_action = "Reclaimed-level (RBS)", "Buy the held retest; stop below the level"
-    elif dbl.get("active") or rhs.get("active"):
+    elif (dbl.get("active") or rhs.get("active")) and phase != "MARKUP" \
+            and _f((book.get("context") or {}).get("ret_60d")) < 15:
+        # a genuine pre-confirm bottom hasn't already rallied — a pattern whose
+        # neckline broke weeks ago and is now +20%/60d isn't "pre-confirm", it's stale
         setup, base_action = "Bottoming (pre-confirm)", "On watch — needs the neckline break"
     elif cstate == "COILED":
         setup, base_action = "Coiled spring", "Watch for a volume break of the base pivot"
@@ -195,6 +198,15 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         score = max(0.0, score - 18)
         if grade in ("A", "B"):
             grade = "C"
+
+    # ── Phase/SMAD conflict (audit): book.phase and smad.state are computed
+    # independently and can disagree (phase=MARKUP while smad=ACCUMULATION) —
+    # that's the detector contradicting itself, not a clean read. Cap conviction
+    # rather than silently trusting whichever branch happened to fire the setup ──
+    if phase == "MARKUP" and sstate == "ACCUMULATION":
+        cautions.append("phase/SMAD conflict — MARKUP vs ACCUMULATION read")
+        if grade == "A":
+            grade = "B"
 
     # ── No actionable plan (audit): a real setup with no defined entry/stop is a
     # WATCH item (a forming base / pre-trigger), NOT a tradeable A/B/C buy ──

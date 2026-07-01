@@ -502,6 +502,43 @@ def test_conviction_no_plan_is_watch():
     assert conviction.assess(stock, _RISK_ON)["grade"] == "WATCH"
 
 
+def test_conviction_no_bottoming_label_on_active_markup():
+    """IOVA-class false positive: a double-bottom neckline broke weeks ago and the
+    stock already rallied +21%/60d in MARKUP — that's not a 'pre-confirm bottom'."""
+    stock = {
+        "composite": 55, "quote": {"market_cap": 1.8e9},
+        "breakdown": {"fundamentals": {"raw": 60}},
+        "smad": {"available": True, "state": "NONE"},
+        "coiled": {"state": "NO SETUP"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "MARKUP"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "above"},
+                 "double_bottom": {"active": True, "confirmed": False, "neckline": 4.0},
+                 "plan": None, "context": {"ret_20d": 5, "ret_60d": 21, "pct_off_high": -26}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["setup"] != "Bottoming (pre-confirm)"
+
+
+def test_conviction_phase_smad_conflict_caps_at_b():
+    """SMA-class case: book.phase says MARKUP, smad says ACCUMULATION for the same
+    ticker — an internal contradiction, not a clean signal; cap conviction."""
+    stock = {
+        "composite": 64, "quote": {"market_cap": 1.8e9},
+        "breakdown": {"fundamentals": {"raw": 82}, "catalyst": {"raw": 70}, "insider": {"raw": 58}},
+        "tilt": {"factor": 1.12},
+        "smad": {"available": True, "state": "ACCUMULATION"},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "MARKUP"}, "rbs": {"active": True, "level": 31.82},
+                 "reversal": {}, "profile": {"position": "above"},
+                 "plan": {"entry": 32.5, "stop": 31.7, "target": 34.1, "rr": 2.1, "risk_pct": 2.5}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] != "A"
+    assert any("conflict" in c for c in v["cautions"])
+
+
 def test_conviction_avoids_bull_trap_and_extended():
     trap = {"composite": 60, "smad": {"available": True, "state": "BULL TRAP"}, "coiled": {}, "edge": {}}
     assert conviction.assess(trap, _RISK_ON)["grade"] == "AVOID"

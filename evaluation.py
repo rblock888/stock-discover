@@ -884,6 +884,77 @@ def grade_scorecard(horizon: int = 20) -> dict:
     }
 
 
+MIN_N_LEDGER = 50   # below this, the ledger is descriptive only
+
+
+def ledger_scorecard() -> dict:
+    """Realized paper-ledger performance — the only measurement of 'the plan
+    makes money' that includes discovery bias, vetoes, and entry feasibility.
+
+    GUARDRAIL: no config/weights/threshold change may cite this until closed
+    n>=50 overall AND n>=20 in the specific cited cell (grade or setup)."""
+    trades = db.get_paper_trades()
+    closed = [t for t in trades if t["status"] == "closed" and t.get("r_realised") is not None]
+    opened = [t for t in trades if t["status"] == "open"]
+    missed = [t for t in trades if t["status"] == "missed"]
+    pending = [t for t in trades if t["status"] == "pending"]
+    n = len(closed)
+
+    def _cell(ts):
+        rs = np.array([t["r_realised"] for t in ts], dtype=float)
+        wins = rs[rs > 0]
+        losses = rs[rs <= 0]
+        pf = (float(wins.sum()) / abs(float(losses.sum()))) if len(losses) and losses.sum() != 0 else None
+        return {
+            "n": len(ts), "low_n": len(ts) < 20,
+            "win_rate": round(float((rs > 0).mean()) * 100, 1) if len(ts) else None,
+            "avg_r": round(float(rs.mean()), 2) if len(ts) else None,
+            "profit_factor": round(pf, 2) if pf is not None else None,
+            "avg_mfe_r": round(float(np.mean([t.get("mfe_r") or 0 for t in ts])), 2) if ts else None,
+            "avg_mae_r": round(float(np.mean([t.get("mae_r") or 0 for t in ts])), 2) if ts else None,
+        }
+
+    by_grade = {}
+    for g in ("A", "B"):
+        ts = [t for t in closed if t.get("grade") == g]
+        if ts:
+            by_grade[g] = _cell(ts)
+    by_setup = {}
+    for t in closed:
+        by_setup.setdefault(t.get("setup_type") or "?", []).append(t)
+    by_setup = {k: _cell(v) for k, v in by_setup.items()}
+
+    # $10k equity curve (fixed book, chronological) + max drawdown
+    curve, equity, peak, max_dd = [], 10_000.0, 10_000.0, 0.0
+    for t in sorted(closed, key=lambda x: x.get("closed_at") or ""):
+        pnl = (t["exit_price"] - t["fill_price"]) * (t.get("shares") or 0)
+        equity += pnl
+        peak = max(peak, equity)
+        max_dd = max(max_dd, (peak - equity) / peak if peak > 0 else 0.0)
+        curve.append({"closed_at": (t.get("closed_at") or "")[:10], "equity": round(equity, 2)})
+
+    slippages = [abs(t["fill_price"] / t["plan_entry"] - 1)
+                 for t in closed + opened
+                 if t.get("fill_price") and t.get("plan_entry")]
+    attempted = n + len(opened) + len(missed)
+    return {
+        "n_closed": n, "n_open": len(opened), "n_pending": len(pending), "n_missed": len(missed),
+        "descriptive_only": n < MIN_N_LEDGER, "need": MIN_N_LEDGER,
+        "win_rate": _cell(closed)["win_rate"] if closed else None,
+        "avg_r": _cell(closed)["avg_r"] if closed else None,
+        "profit_factor": _cell(closed)["profit_factor"] if closed else None,
+        "max_drawdown_pct": round(max_dd * 100, 1),
+        "equity": round(equity, 2),
+        "equity_curve": curve[-60:],
+        "avg_entry_slippage_pct": round(float(np.mean(slippages)) * 100, 2) if slippages else None,
+        "missed_fill_rate": round(len(missed) / attempted * 100, 1) if attempted else None,
+        "by_grade": by_grade, "by_setup": by_setup,
+        "banner": "Paper fills at 30-min granularity — optimistic vs real execution. "
+                  f"Descriptive only below {MIN_N_LEDGER} closed trades; no parameter "
+                  "change may cite a cell below n=20.",
+    }
+
+
 def refresh(horizons=None) -> dict:
     """Recompute forward returns + scorecard + calibration. Never raises."""
     try:

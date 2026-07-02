@@ -60,6 +60,7 @@ import pre_breakout
 import smad
 import book_signals
 import setup_backtest
+import paper_ledger
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -242,6 +243,14 @@ def _run_full_pipeline():
             alerts_module.process_scan_results(ranked_list, ai_picks)
         except Exception as e:
             logger.error(f"Failed to send alerts: {e}")
+
+        # ─── Paper-trade ledger pass (opens A/B plans, manages positions) ───
+        try:
+            rep = paper_ledger.process(ranked_list, regime_label=regime_label)
+            if rep and not rep.get("skipped"):
+                logger.info(f"Paper ledger: {rep}")
+        except Exception as e:
+            logger.error(f"Paper ledger pass failed: {e}")
 
         # ─── Recompose the daily brief on fresh scan data ───
         _recompose_brief()
@@ -707,6 +716,18 @@ def _setup_stats_map():
 async def get_setup_backtest():
     """Full historical setup backtest — win-rate + expectancy per setup type."""
     return _clean(setup_backtest.get_cached())
+
+
+@app.get("/api/ledger")
+async def get_ledger():
+    """Paper-trade ledger: realized performance of A/B plans at real fills,
+    plus the open/pending book."""
+    return _clean({
+        "scorecard": evaluation.ledger_scorecard(),
+        "open": db.get_paper_trades(status="open"),
+        "pending": db.get_paper_trades(status="pending"),
+        "recent_closed": db.get_paper_trades(status="closed")[-20:],
+    })
 
 
 def _next_scan_seconds() -> int:

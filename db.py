@@ -104,6 +104,38 @@ def init_db():
             )
         """)
 
+        # Paper-trade ledger v1: every grade-A/B plan gets a simulated position
+        # at REAL 30-min-granularity quotes — the only measurement of "the plan
+        # makes money" that includes discovery bias, vetoes, and entry
+        # feasibility. Rows are never edited by management-variant experiments.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                setup_type TEXT,
+                grade TEXT,
+                regime_at_open TEXT,
+                plan_entry REAL,
+                fill_price REAL,
+                stop REAL,
+                target REAL,
+                shares INTEGER,
+                opened_at TEXT,
+                status TEXT NOT NULL,      -- pending | open | closed | missed
+                exit_price REAL,
+                exit_reason TEXT,          -- stop | target | time
+                closed_at TEXT,
+                r_realised REAL,
+                mfe_r REAL,
+                mae_r REAL,
+                first_seen TEXT,
+                last_quote REAL,
+                notes TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_paper_ticker ON paper_trades(ticker)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status)")
+
         conn.commit()
 
 
@@ -403,3 +435,49 @@ def get_recent_alerts(limit: int = 50) -> list:
             (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ────────────────────────────────────────────
+# Paper-trade ledger
+
+_PAPER_COLS = {"ticker", "setup_type", "grade", "regime_at_open", "plan_entry",
+               "fill_price", "stop", "target", "shares", "opened_at", "status",
+               "exit_price", "exit_reason", "closed_at", "r_realised", "mfe_r",
+               "mae_r", "first_seen", "last_quote", "notes"}
+
+
+def paper_insert(row: dict) -> int:
+    cols = [k for k in row if k in _PAPER_COLS]
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO paper_trades ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            [row[k] for k in cols],
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def paper_update(trade_id: int, **fields):
+    sets = {k: v for k, v in fields.items() if k in _PAPER_COLS}
+    if not sets:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE paper_trades SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
+            [*sets.values(), trade_id],
+        )
+        conn.commit()
+
+
+def get_paper_trades(status: str = None, ticker: str = None) -> list:
+    q = "SELECT * FROM paper_trades"
+    conds, args = [], []
+    if status:
+        conds.append("status=?"); args.append(status)
+    if ticker:
+        conds.append("ticker=?"); args.append(ticker)
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY id ASC"
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]

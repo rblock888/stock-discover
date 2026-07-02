@@ -632,6 +632,47 @@ def test_backtest_wilson_ci_and_expectancy_lb():
     assert agg["by_setup"][0]["setup"] == "BigN"    # lb-sort puts the real sample first
 
 
+# ── paper ledger: sizing, fills, exit decisions ──────────────────────────────
+
+import paper_ledger
+
+
+def test_ledger_sizing_binding_constraints():
+    # risk-bound: $75 risk / $0.50 per-share risk = 150 shares (pos cap 1000/10=100 binds!)
+    assert paper_ledger.size_shares(fill=10.0, stop=9.5, adv_dollars=10_000_000) == 100
+    # risk binds when the position cap is loose: $75 / $2 = 37 shares
+    assert paper_ledger.size_shares(fill=10.0, stop=8.0, adv_dollars=10_000_000) == 37
+    # ADV binds for an illiquid name: 1% of $20k ADV = $200 / $10 = 20 shares
+    assert paper_ledger.size_shares(fill=10.0, stop=8.0, adv_dollars=20_000) == 20
+    # invalid risk → 0
+    assert paper_ledger.size_shares(fill=10.0, stop=10.5, adv_dollars=1e6) == 0
+
+
+def test_ledger_fill_tolerance():
+    assert paper_ledger.can_fill(quote=10.1, plan_entry=10.0, stop=9.0) is True
+    assert paper_ledger.can_fill(quote=10.3, plan_entry=10.0, stop=9.0) is False  # >2% drift
+    assert paper_ledger.can_fill(quote=8.9, plan_entry=10.0, stop=9.0) is False   # under stop
+
+
+def test_ledger_manage_stop_first_at_quote():
+    """A gap through the stop exits at the QUOTE (real slippage), the target
+    exits AT the target (limit semantics), otherwise hold."""
+    tr = {"fill_price": 10.0, "stop": 9.0, "target": 12.0, "opened_at": "2026-07-01T10:00:00"}
+    d = paper_ledger.manage_decision(tr, quote=8.5, now_iso="2026-07-02T10:00:00")
+    assert d["exit_reason"] == "stop" and d["exit_price"] == 8.5
+    assert d["r_realised"] == pytest.approx(-1.5)
+    d2 = paper_ledger.manage_decision(tr, quote=13.0, now_iso="2026-07-02T10:00:00")
+    assert d2["exit_reason"] == "target" and d2["exit_price"] == 12.0  # no gap-up windfall
+    assert paper_ledger.manage_decision(tr, quote=10.5, now_iso="2026-07-02T10:00:00") is None
+
+
+def test_ledger_time_exit_after_20_trading_days():
+    tr = {"fill_price": 10.0, "stop": 9.0, "target": 12.0, "opened_at": "2026-06-01T10:00:00"}
+    d = paper_ledger.manage_decision(tr, quote=10.2, now_iso="2026-07-02T10:00:00")
+    assert d is not None and d["exit_reason"] == "time"
+    assert d["exit_price"] == pytest.approx(10.2)
+
+
 # ── conviction: the synthesized verdict ──────────────────────────────────────
 
 import conviction

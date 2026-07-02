@@ -706,9 +706,14 @@ export interface EvidenceWeights {
   n: number;
   need?: number;
   horizon: number;
-  bucket_ic?: Record<string, number>;
+  n_days_5d?: number;
+  n_days_10d?: number;
+  need_days?: number;
+  bucket_ic?: Record<string, number | null>;
   current_weights: Record<string, number>;
   recommended_weights?: Record<string, number>;
+  shrunk_weights?: Record<string, number>;
+  naive_ic_weights?: Record<string, number>;
   detail: string;
 }
 

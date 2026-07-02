@@ -204,10 +204,111 @@ def _isotonic(x: np.ndarray, y: np.ndarray) -> tuple:
     return xs, fit
 
 
+# ── Robust statistics: quarantine, winsorization, daily cross-sectional IC ────
+
+OUTLIER_ABS_RETURN = 3.0   # |fwd_return| > 300% at h<=10d = data artifact, not alpha
+MIN_NAMES_PER_DAY = 8      # cross-sectional IC needs a real cross-section
+WINSOR_PCT = (2, 98)       # pooled clip percentiles for winsorized means
+
+
+def _quarantine(data: list, horizon: int) -> tuple:
+    """Split rows into (kept, flagged). A single yfinance artifact (+3810% '10d
+    return') was found manufacturing the headline decile spread — such rows are
+    data bugs to fix at the source, not alpha; exclude them from ALL return
+    stats and surface them for auditing."""
+    if horizon > 10:
+        return data, []
+    kept, flagged = [], []
+    for d in data:
+        r = d.get("fwd_return")
+        if r is not None and abs(r) > OUTLIER_ABS_RETURN:
+            flagged.append({"ticker": d.get("ticker"), "snap_day": d.get("snap_day"),
+                            "fwd_return": round(float(r), 3)})
+        else:
+            kept.append(d)
+    return kept, flagged
+
+
+def _clip_bounds(rets: np.ndarray) -> tuple:
+    """Pooled winsorization bounds — computed ONCE per matched sample, never
+    per-bin (per-bin bounds let a single outlier keep its own bin inflated)."""
+    if len(rets) < 20:
+        return None, None
+    lo, hi = np.nanpercentile(rets, list(WINSOR_PCT))
+    return float(lo), float(hi)
+
+
+def _wmean_pct(rt: np.ndarray, lo, hi):
+    if lo is None:
+        return round(float(np.nanmean(rt)) * 100, 2)
+    return round(float(np.nanmean(np.clip(rt, lo, hi))) * 100, 2)
+
+
+def _trading_days() -> set | None:
+    """ISO dates of real trading sessions (from SPY history). None = unknown."""
+    try:
+        spy = price_history.get_history("SPY", period="1y")
+        if spy is None or spy.empty:
+            return None
+        return {str(d)[:10] for d in spy.index.date}
+    except Exception:
+        return None
+
+
+def _daily_ics(rows: list) -> list:
+    """rows = [(snap_day, x, y)] → [(day, cross-sectional spearman)] over real
+    trading days with >= MIN_NAMES_PER_DAY names. Pooled IC over all rows
+    inflates n (40 names on one day are ONE market draw, not 40)."""
+    tdays = _trading_days()
+    by_day = {}
+    for day, x, y in rows:
+        d = str(day)[:10]
+        if tdays is not None and d not in tdays:
+            continue
+        by_day.setdefault(d, []).append((x, y))
+    out = []
+    for d in sorted(by_day):
+        pts = by_day[d]
+        if len(pts) < MIN_NAMES_PER_DAY:
+            continue
+        xs = np.array([p[0] for p in pts], dtype=float)
+        ys = np.array([p[1] for p in pts], dtype=float)
+        out.append((d, _spearman(xs, ys)))
+    return out
+
+
+def _nw_tstat(series: list, lag: int) -> float | None:
+    """t-stat of the mean of a (possibly autocorrelated) daily-IC series using a
+    Newey-West (Bartlett) variance. A plain sqrt(n) t on overlapping-horizon
+    daily ICs badly overstates significance (it already gave catalyst t≈3.9 off
+    3 days of data)."""
+    n = len(series)
+    if n < 3:
+        return None
+    a = np.array(series, dtype=float)
+    d = a - a.mean()
+    # 1/n normalization throughout — with Bartlett weights this keeps the
+    # long-run variance estimate positive semi-definite (1/(n-l) does not)
+    gamma0 = float((d * d).sum()) / n
+    if gamma0 <= 0:
+        return None
+    var = gamma0
+    L = max(0, min(lag, n - 2))
+    for l in range(1, L + 1):
+        gamma_l = float((d[:-l] * d[l:]).sum()) / n
+        var += 2.0 * (1.0 - l / (L + 1.0)) * gamma_l
+    if var <= 0:
+        var = gamma0  # numerical floor: never less than the no-autocorr variance
+    return float(a.mean() / math.sqrt(var / n))
+
+
 # ── Scorecard ─────────────────────────────────────────────────────────────────
 
-def _decile_table(scores: np.ndarray, rets: np.ndarray, excess: np.ndarray, n_bins=10) -> list:
-    """Bin by score; per bin report count, avg return, avg excess, win-rate."""
+def _decile_table(scores: np.ndarray, rets: np.ndarray, excess: np.ndarray, n_bins=10,
+                  lo=None, hi=None) -> list:
+    """Bin by score; per bin report count, avg/median/winsorized return, win-rate.
+    Raw mean stays visible (the fat right tail IS the strategy) but median and
+    the pooled-winsorized mean are the decision-driving columns."""
     if len(scores) < n_bins * 2:
         n_bins = max(2, len(scores) // 4)
     order = np.argsort(scores, kind="mergesort")
@@ -222,7 +323,10 @@ def _decile_table(scores: np.ndarray, rets: np.ndarray, excess: np.ndarray, n_bi
             "score_lo": round(float(sc[idx[0]]), 1),
             "score_hi": round(float(sc[idx[-1]]), 1),
             "n": int(len(idx)),
+            "low_n": bool(len(idx) < 20),
             "avg_return_pct": round(float(rt[idx].mean()) * 100, 2),
+            "median_return_pct": round(float(np.median(rt[idx])) * 100, 2),
+            "wmean_return_pct": _wmean_pct(rt[idx], lo, hi),
             "avg_excess_pct": round(float(ex[idx].mean()) * 100, 2) if not np.isnan(ex[idx]).all() else None,
             "win_rate": round(float((rt[idx] >= WIN_THRESHOLD).mean()) * 100, 1),
             "beat_spy_rate": round(float((ex[idx] > 0).mean()) * 100, 1) if not np.isnan(ex[idx]).all() else None,
@@ -236,9 +340,15 @@ def scorecard(horizon: int = 20) -> dict:
     if not data:
         return {"available": False, "horizon": horizon, "n": 0,
                 "detail": "No resolved forward returns yet — run compute_forward_returns()"}
+    data, flagged = _quarantine(data, horizon)
+    if not data:
+        return {"available": False, "horizon": horizon, "n": 0,
+                "n_excluded": len(flagged), "outliers_flagged": flagged,
+                "detail": "All rows quarantined as data artifacts"}
 
     rets = np.array([d["fwd_return"] for d in data], dtype=float)
     excess = np.array([d["excess_return"] if d["excess_return"] is not None else np.nan for d in data], dtype=float)
+    lo, hi = _clip_bounds(rets)
 
     signals = {}
     for field in ("composite_score", "ml_score"):
@@ -250,14 +360,24 @@ def scorecard(horizon: int = 20) -> dict:
         exm = excess[m]
         ic = _spearman(scm, rtm)
         ic_excess = _spearman(scm, np.nan_to_num(exm, nan=0.0)) if not np.isnan(exm).all() else None
-        table = _decile_table(scm, rtm, exm)
+        # per-day cross-sectional IC — the honest n is DAYS, not rows
+        dics = _daily_ics([(data[i]["snap_day"], sc[i], rets[i]) for i in np.where(m)[0]])
+        ic_vals = [v for _, v in dics]
+        t_nw = _nw_tstat(ic_vals, lag=horizon - 1)
+        table = _decile_table(scm, rtm, exm, lo=lo, hi=hi)
         top, bot = table[-1], table[0]
         signals[field] = {
             "ic": round(ic, 3),
             "ic_excess": round(ic_excess, 3) if ic_excess is not None else None,
             "n": int(m.sum()),
+            "n_days": len(dics),
+            "mean_daily_ic": round(float(np.mean(ic_vals)), 3) if ic_vals else None,
+            "t_nw": round(t_nw, 2) if t_nw is not None else None,
             "deciles": table,
-            "top_minus_bottom_pct": round(top["avg_return_pct"] - bot["avg_return_pct"], 2),
+            # winsorized-mean spread — the raw-mean version was manufactured by a
+            # single +3810% artifact row in the bottom decile
+            "top_minus_bottom_pct": round(top["wmean_return_pct"] - bot["wmean_return_pct"], 2),
+            "top_minus_bottom_median_pct": round(top["median_return_pct"] - bot["median_return_pct"], 2),
             "top_win_rate": top["win_rate"],
             "bottom_win_rate": bot["win_rate"],
         }
@@ -266,7 +386,11 @@ def scorecard(horizon: int = 20) -> dict:
         "available": True,
         "horizon": horizon,
         "n": len(data),
+        "n_excluded": len(flagged),
+        "outliers_flagged": flagged[:10],
         "overall_avg_return_pct": round(float(np.nanmean(rets)) * 100, 2),
+        "overall_median_return_pct": round(float(np.nanmedian(rets)) * 100, 2),
+        "overall_wmean_return_pct": _wmean_pct(rets, lo, hi),
         "overall_win_rate": round(float((rets >= WIN_THRESHOLD).mean()) * 100, 1),
         "overall_beat_spy_rate": round(float((excess > 0).mean()) * 100, 1) if not np.isnan(excess).all() else None,
         "signals": signals,
@@ -327,17 +451,16 @@ def _feature_lookup() -> dict:
     return out
 
 
-def evidence_weights(horizon: int = 5) -> dict:
-    """Per-bucket Information Coefficient vs forward return → evidence-based weights.
+MIN_DAYS_EVIDENCE = 15   # independent trading days per horizon before "ready"
+SHRINK_HALFLIFE_DAYS = 40  # k = n_days_eff / (n_days_eff + 40)
 
-    Measures which buckets actually predict and what the composite weights
-    *should* be (∝ positive IC). Reports current vs recommended but does NOT
-    auto-apply — it stays "accruing" until per-bucket data (persisted from
-    2026-06-22) resolves enough forward returns to be trustworthy.
-    """
+
+def _paired_bucket_rows(horizon: int) -> list:
+    """[(snap_day, bucket_dict, fwd_return)] joined snapshot↔return rows."""
     rets = db.get_snapshot_returns(horizon)
+    rets, _ = _quarantine(rets, horizon)
     feats = _feature_lookup()
-    paired = []  # (bucket_dict, fwd_return)
+    paired = []
     for r in rets:
         f = feats.get((r["ticker"], r["snap_day"]))
         if not f or not f.get("bucket_scores"):
@@ -347,78 +470,261 @@ def evidence_weights(horizon: int = 5) -> dict:
         except Exception:
             continue
         if any(bs.get(b) is not None for b in BUCKETS):
-            paired.append((bs, r["fwd_return"]))
+            paired.append((r["snap_day"], bs, r["fwd_return"]))
+    return paired
 
+
+def _bucket_daily_stats(paired: list, horizon: int) -> dict:
+    """Per bucket: daily cross-sectional ICs + Newey-West t. The honest sample
+    size is trading DAYS, not rows — 40 names scored on one day are one market
+    draw. A pooled Spearman over rows already almost shipped a 100%-catalyst
+    weights recommendation off 3 days of data."""
+    out = {}
+    for b in BUCKETS:
+        rows = [(day, bs.get(b), ret) for day, bs, ret in paired if bs.get(b) is not None]
+        dics = _daily_ics(rows)
+        vals = [v for _, v in dics]
+        t = _nw_tstat(vals, lag=horizon - 1)
+        out[b] = {
+            "daily_ics": [round(v, 3) for v in vals],
+            "mean_daily_ic": round(float(np.mean(vals)), 3) if vals else None,
+            "sd_daily_ic": round(float(np.std(vals)), 3) if len(vals) > 1 else None,
+            "n_days": len(vals),
+            "positive_day_share": round(float(np.mean([v > 0 for v in vals])), 2) if vals else None,
+            "t_nw": round(t, 2) if t is not None else None,
+        }
+    return out
+
+
+def evidence_weights(horizon: int = 5) -> dict:
+    """Per-bucket predictive power → evidence-based weights, hardened.
+
+    Statistics per bucket are DAILY cross-sectional ICs with a Newey-West t
+    (lag = horizon-1); a bucket is significant only if |t| >= 2 AND its mean
+    daily IC has the same sign at BOTH 5d and 10d. The recommendation is a
+    SHRUNK blend toward equal weight (k = n_days_eff/(n_days_eff+40)), clamped
+    to [0.05, 0.50] per bucket — never again a 100%-one-bucket recommendation
+    off a 3-day window. Report-only; weights are never auto-applied.
+    """
+    paired = _paired_bucket_rows(horizon)
+    paired10 = _paired_bucket_rows(10) if horizon != 10 else paired
     n = len(paired)
     current = dict(config.WEIGHTS)
-    if n < MIN_N_EVIDENCE:
-        return {"available": False, "status": "accruing", "n": n,
-                "need": MIN_N_EVIDENCE, "horizon": horizon,
-                "current_weights": current,
-                "detail": f"Per-bucket scores resolve from 2026-06-22 — {n}/{MIN_N_EVIDENCE} forward returns so far."}
 
-    rt = np.array([p[1] for p in paired], dtype=float)
-    ics, pos = {}, {}
+    stats5 = _bucket_daily_stats(paired, horizon)
+    stats10 = _bucket_daily_stats(paired10, 10)
+    n_days5 = min((stats5[b]["n_days"] for b in BUCKETS), default=0)
+    n_days10 = min((stats10[b]["n_days"] for b in BUCKETS), default=0)
+
+    # pooled IC kept for audit only — its n is inflated
+    rt = np.array([p[2] for p in paired], dtype=float) if paired else np.array([])
+    pooled = {}
     for b in BUCKETS:
-        sc = np.array([p[0].get(b) if p[0].get(b) is not None else np.nan for p in paired], dtype=float)
+        sc = np.array([p[1].get(b) if p[1].get(b) is not None else np.nan for p in paired], dtype=float)
         m = ~np.isnan(sc)
-        ic = _spearman(sc[m], rt[m]) if m.sum() >= MIN_N_EVIDENCE else 0.0
-        ics[b] = round(ic, 3)
-        pos[b] = max(0.0, ic)
+        pooled[b] = round(_spearman(sc[m], rt[m]), 3) if m.sum() >= 30 else None
 
-    total = sum(pos.values())
-    recommended = ({b: round(pos[b] / total, 3) for b in BUCKETS} if total > 0 else current)
+    significant, harmful, reasons = {}, {}, {}
+    for b in BUCKETS:
+        s5, s10 = stats5[b], stats10[b]
+        t5 = s5["t_nw"]
+        if s10["n_days"] < 3 or s10["mean_daily_ic"] is None:
+            significant[b] = False
+            reasons[b] = f"h10 accruing ({s10['n_days']} days)"
+        elif t5 is None or abs(t5) < 2:
+            significant[b] = False
+            reasons[b] = f"|t_NW|={abs(t5) if t5 is not None else 0:.1f} < 2"
+        elif (s5["mean_daily_ic"] or 0) * (s10["mean_daily_ic"] or 0) <= 0:
+            significant[b] = False
+            reasons[b] = "5d/10d IC signs disagree"
+        else:
+            significant[b] = True
+            reasons[b] = "significant"
+        t10 = s10["t_nw"]
+        harmful[b] = bool(t5 is not None and t5 <= -2 and t10 is not None and t10 <= -2)
+
+    # shrunk recommendation: blend the positive-IC allocation toward equal weight
+    # by data credibility; harmful buckets pinned at the 0.05 floor
+    equal = 1.0 / len(BUCKETS)
+    n_days_eff = min(n_days5, n_days10)
+    k = n_days_eff / (n_days_eff + SHRINK_HALFLIFE_DAYS)
+    pos = {b: max(0.0, stats5[b]["mean_daily_ic"] or 0.0) for b in BUCKETS if not harmful[b]}
+    total_pos = sum(pos.values())
+    raw_shrunk = {}
+    for b in BUCKETS:
+        if harmful[b]:
+            raw_shrunk[b] = 0.05
+        else:
+            ic_alloc = (pos[b] / total_pos) if total_pos > 0 else equal
+            raw_shrunk[b] = min(0.50, max(0.05, equal + k * (ic_alloc - equal)))
+    total_shrunk = sum(raw_shrunk.values())
+    shrunk = {b: round(v / total_shrunk, 3) for b, v in raw_shrunk.items()}
+
+    # naive (old) recommendation kept for audit — pos/total over pooled IC
+    naive_pos = {b: max(0.0, pooled[b] or 0.0) for b in BUCKETS}
+    naive_total = sum(naive_pos.values())
+    naive = ({b: round(naive_pos[b] / naive_total, 3) for b in BUCKETS}
+             if naive_total > 0 else dict(current))
+
+    accruing = n < MIN_N_EVIDENCE or n_days5 < MIN_DAYS_EVIDENCE or n_days10 < MIN_DAYS_EVIDENCE
+    any_sig = any(significant.values())
+    recommended = shrunk if (not accruing and any_sig) else current
+
     return {
-        "available": True, "status": "ready", "n": n, "horizon": horizon,
-        "bucket_ic": ics,
+        "available": not accruing, "status": "accruing" if accruing else "ready",
+        "n": n, "need": MIN_N_EVIDENCE, "horizon": horizon,
+        "n_days_5d": n_days5, "n_days_10d": n_days10, "need_days": MIN_DAYS_EVIDENCE,
+        "bucket_ic": {b: stats5[b]["mean_daily_ic"] for b in BUCKETS},
+        "bucket_stats_5d": stats5, "bucket_stats_10d": stats10,
+        "pooled_ic_inflated_n": pooled,
+        "significant": significant, "significance_reasons": reasons, "harmful": harmful,
         "current_weights": current,
         "recommended_weights": recommended,
-        "detail": "Evidence-based weights ∝ each bucket's positive IC vs forward return.",
+        "shrunk_weights": shrunk,
+        "naive_ic_weights": naive,
+        "shrink_k": round(k, 2),
+        "detail": ("Insufficient evidence to reallocate — recommendation = current weights. "
+                   f"Daily cross-sectional ICs: {n_days5}d @5d, {n_days10}d @10d "
+                   f"(need {MIN_DAYS_EVIDENCE} each); Newey-West t per bucket."
+                   if (accruing or not any_sig) else
+                   "Shrunk evidence-based weights (daily IC, NW-t significant, "
+                   f"clamped [0.05, 0.50], shrink k={k:.2f}). Report-only."),
+    }
+
+
+CAT_COMPONENTS = ["cat_earnings_days", "cat_target_upside", "cat_rec_score",
+                  "cat_n_analysts", "attention"]
+MIN_N_CAT_COMPONENT = 250
+
+
+def catalyst_components(horizon: int = 5) -> dict:
+    """Which catalyst SUB-component carries the bucket's IC (+0.24 measured)?
+
+    Raw sub-values (earnings proximity, analyst target upside, recommendation,
+    coverage count, news attention) persist in bucket_scores from 2026-07-02.
+    Per component: Spearman IC at this horizon AND at 10d over non-null rows.
+    GUARDRAIL (documented here, enforced by the humans reading it): no weight /
+    veto / filter change off a component until n>=250 AND >=60 distinct tickers
+    AND >=25 distinct scan dates AND sign(ic_5d)==sign(ic_10d) AND |ic|>=0.10.
+    Note: cat_earnings_days is DAYS-UNTIL — a NEGATIVE IC means sooner earnings
+    → higher forward returns."""
+    def _rows(h):
+        rets = db.get_snapshot_returns(h)
+        rets, _ = _quarantine(rets, h)
+        feats = _feature_lookup()
+        out = []
+        for r in rets:
+            f = feats.get((r["ticker"], r["snap_day"]))
+            if not f or not f.get("bucket_scores"):
+                continue
+            try:
+                bs = json.loads(f["bucket_scores"])
+            except Exception:
+                continue
+            out.append((r["ticker"], r["snap_day"], bs, r["fwd_return"]))
+        return out
+
+    rows5, rows10 = _rows(horizon), _rows(10)
+    comps = {}
+    for c in CAT_COMPONENTS:
+        stats = {}
+        for label, rows in (("5d", rows5), ("10d", rows10)):
+            pts = [(t, d, bs.get(c), ret) for t, d, bs, ret in rows if bs.get(c) is not None]
+            n = len(pts)
+            if n >= 30:
+                x = np.array([p[2] for p in pts], dtype=float)
+                y = np.array([p[3] for p in pts], dtype=float)
+                stats[f"ic_{label}"] = round(_spearman(x, y), 3)
+            else:
+                stats[f"ic_{label}"] = None
+            stats[f"n_{label}"] = n
+            if label == "5d":
+                stats["n_tickers"] = len({p[0] for p in pts})
+                stats["n_days"] = len({str(p[1])[:10] for p in pts})
+        # stale-single-analyst artifact check: target_upside from 1 analyst is
+        # often months old — report that cohort's size separately
+        if c == "cat_target_upside":
+            single = [1 for t, d, bs, ret in rows5
+                      if bs.get(c) is not None and (bs.get("cat_n_analysts") or 0) <= 1]
+            stats["single_analyst_n"] = len(single)
+        n5 = stats["n_5d"]
+        stats["status"] = "ready" if n5 >= MIN_N_CAT_COMPONENT else "accruing"
+        stats["need"] = MIN_N_CAT_COMPONENT
+        comps[c] = stats
+
+    return {
+        "components": comps, "horizon": horizon,
+        "actionable_when": "n>=250 AND >=60 tickers AND >=25 scan dates AND "
+                           "sign(ic_5d)==sign(ic_10d) AND |ic|>=0.10",
+        "detail": "Catalyst sub-component ICs — persisted from 2026-07-02, accrues from zero.",
     }
 
 
 def tilt_ab(horizon: int = 5) -> dict:
-    """Did the regime tilt help? Compare tilted (rank_score) vs base (composite)
-    ordering on realized forward returns. Accrues until tilted snapshots age."""
+    """Did the regime tilt help? PAIRED daily test: per trading day compute the
+    cross-sectional IC of the tilted ordering (rank_score) and of the base
+    ordering (composite) on the same names, then test the mean of the per-day
+    DELTAS with a Newey-West t. A pooled comparison mixes days and inflates n."""
     rets = db.get_snapshot_returns(horizon)
+    rets, _ = _quarantine(rets, horizon)
     feats = _feature_lookup()
     rows = []
     for r in rets:
         f = feats.get((r["ticker"], r["snap_day"]))
         if f and f.get("tilt_factor") is not None and f.get("rank_score") is not None:
-            rows.append((f["composite_score"], f["rank_score"], f["tilt_factor"], r["fwd_return"]))
+            rows.append((r["snap_day"], f["composite_score"], f["rank_score"], f["tilt_factor"], r["fwd_return"]))
 
     n = len(rows)
-    moved = sum(1 for c, rk, tf, _ in rows if abs((tf or 1) - 1) >= 0.04)
-    if n < MIN_N_TILT or moved < 20:
+    moved = sum(1 for _, c, rk, tf, _r in rows if abs((tf or 1) - 1) >= 0.04)
+    base_ics = _daily_ics([(d, c, ret) for d, c, rk, tf, ret in rows])
+    tilt_ics = _daily_ics([(d, rk, ret) for d, c, rk, tf, ret in rows])
+    base_by_day = dict(base_ics)
+    deltas = [(d, v - base_by_day[d]) for d, v in tilt_ics if d in base_by_day]
+    n_days = len(deltas)
+    delta_vals = [v for _, v in deltas]
+    t_delta = _nw_tstat(delta_vals, lag=horizon - 1)
+
+    if n < MIN_N_TILT or moved < 20 or n_days < MIN_DAYS_EVIDENCE:
         return {"available": False, "status": "accruing", "n": n, "moved": moved,
                 "need": MIN_N_TILT, "horizon": horizon,
-                "detail": f"Regime tilt persists from 2026-06-22; needs tilted picks to age {horizon}d — {n}/{MIN_N_TILT} resolved, {moved} actually tilted."}
+                "n_days": n_days, "need_days": MIN_DAYS_EVIDENCE,
+                "mean_delta_ic": round(float(np.mean(delta_vals)), 3) if delta_vals else None,
+                "t_delta_nw": round(t_delta, 2) if t_delta is not None else None,
+                "detail": f"Paired daily tilt test accruing — {n}/{MIN_N_TILT} rows, "
+                          f"{moved} tilted, {n_days}/{MIN_DAYS_EVIDENCE} trading days."}
 
-    comp = np.array([r[0] for r in rows], dtype=float)
-    rank = np.array([r[1] for r in rows], dtype=float)
-    ret = np.array([r[3] for r in rows], dtype=float)
+    comp = np.array([r[1] for r in rows], dtype=float)
+    rank = np.array([r[2] for r in rows], dtype=float)
+    ret = np.array([r[4] for r in rows], dtype=float)
+    lo, hi = _clip_bounds(ret)
     ic_base = _spearman(comp, ret)
     ic_tilt = _spearman(rank, ret)
-    # Top-quartile mean forward return under each ordering
+    # Top-quartile winsorized-mean forward return under each ordering
     k = max(1, n // 4)
-    top_base = float(np.mean(ret[np.argsort(comp)[-k:]]))
-    top_tilt = float(np.mean(ret[np.argsort(rank)[-k:]]))
+    top_base_r = ret[np.argsort(comp)[-k:]]
+    top_tilt_r = ret[np.argsort(rank)[-k:]]
     return {
         "available": True, "status": "ready", "n": n, "horizon": horizon,
+        "n_days": n_days,
         "ic_base": round(ic_base, 3), "ic_tilt": round(ic_tilt, 3),
         "ic_delta": round(ic_tilt - ic_base, 3),
-        "top_quartile_base_pct": round(top_base * 100, 2),
-        "top_quartile_tilt_pct": round(top_tilt * 100, 2),
-        "tilt_helps": ic_tilt > ic_base,
-        "detail": "Tilted ranking (rank_score) vs base (composite) on realized returns.",
+        "mean_delta_ic": round(float(np.mean(delta_vals)), 3) if delta_vals else None,
+        "t_delta_nw": round(t_delta, 2) if t_delta is not None else None,
+        "top_quartile_base_pct": _wmean_pct(top_base_r, lo, hi),
+        "top_quartile_tilt_pct": _wmean_pct(top_tilt_r, lo, hi),
+        "top_quartile_base_median_pct": round(float(np.median(top_base_r)) * 100, 2),
+        "top_quartile_tilt_median_pct": round(float(np.median(top_tilt_r)) * 100, 2),
+        "tilt_helps": bool(delta_vals and float(np.mean(delta_vals)) > 0),
+        "detail": "Paired per-day delta IC (tilted minus base) with Newey-West t; "
+                  "top-quartile returns winsorized.",
     }
 
 
-def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray) -> list:
-    """Per-grade breakdown: n / avg_return_pct / win_rate / beat_spy_rate. Mirrors
-    _decile_table()'s shape but bins by discrete grade instead of score decile,
-    since conviction grade is ordinal/categorical, not continuous."""
+def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray,
+                 lo=None, hi=None) -> list:
+    """Per-grade breakdown: n / avg / median / winsorized return / win-rate.
+    Mirrors _decile_table()'s shape but bins by discrete grade instead of score
+    decile, since conviction grade is ordinal/categorical, not continuous."""
     out = []
     for g in GRADE_ORDER + ["—"]:
         m = grades == g
@@ -429,6 +735,8 @@ def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray) -> li
         out.append({
             "grade": g, "n": n, "low_n": n < MIN_N_GRADE_PER_BUCKET,
             "avg_return_pct": round(float(rt.mean()) * 100, 2),
+            "median_return_pct": round(float(np.median(rt)) * 100, 2),
+            "wmean_return_pct": _wmean_pct(rt, lo, hi),
             "avg_excess_pct": round(float(ex.mean()) * 100, 2) if not np.isnan(ex).all() else None,
             "win_rate": round(float((rt >= WIN_THRESHOLD).mean()) * 100, 1),
             "beat_spy_rate": round(float((ex > 0).mean()) * 100, 1) if not np.isnan(ex).all() else None,
@@ -449,6 +757,7 @@ def grade_scorecard(horizon: int = 20) -> dict:
     persisted — only a few derived scalar columns were.
     """
     rets = db.get_snapshot_returns(horizon)
+    rets, _ = _quarantine(rets, horizon)
     feats = _feature_lookup()
     rows = []
     for r in rets:
@@ -467,12 +776,13 @@ def grade_scorecard(horizon: int = 20) -> dict:
     grades = np.array([r[0] for r in rows], dtype=object)
     fwd = np.array([r[1] for r in rows], dtype=float)
     excess = np.array([r[2] if r[2] is not None else np.nan for r in rows], dtype=float)
+    lo, hi = _clip_bounds(fwd)
 
     ranked_mask = np.array([g in GRADE_ORDINAL for g in grades])
     ordinal = np.array([GRADE_ORDINAL[g] for g in grades[ranked_mask]], dtype=float)
     grade_ic = _spearman(ordinal, fwd[ranked_mask])
 
-    table = _grade_table(grades, fwd, excess)
+    table = _grade_table(grades, fwd, excess, lo=lo, hi=hi)
     by_grade = {row["grade"]: row for row in table}
 
     # Inversion check — a WORSE grade showing a HIGHER forward excess return than
@@ -517,6 +827,15 @@ def refresh(horizons=None) -> dict:
         _cache["evidence_weights"] = evidence_weights(5)
         _cache["tilt_ab"] = tilt_ab(5)
         _cache["grade_scorecard"] = {h: grade_scorecard(h) for h in (horizons or HORIZONS)}
+        _cache["catalyst_components"] = catalyst_components(5)
+        # cross-horizon evidence matrix — is a bucket's IC consistent across 5/10/20/60d?
+        matrix = {}
+        for h in (horizons or HORIZONS):
+            stats = _bucket_daily_stats(_paired_bucket_rows(h), h)
+            for b, s in stats.items():
+                matrix.setdefault(b, {})[h] = {
+                    "ic": s["mean_daily_ic"], "n_days": s["n_days"], "t_nw": s["t_nw"]}
+        _cache["evidence_weights_matrix"] = matrix
         return {"coverage": cov, "scorecards": cards}
     except Exception as e:
         logger.error(f"evaluation.refresh failed: {e}")
@@ -555,4 +874,6 @@ def get_cached() -> dict:
         "evidence_weights": _cache.get("evidence_weights") or evidence_weights(5),
         "tilt_ab": _cache.get("tilt_ab") or tilt_ab(5),
         "grade_scorecard": _cache.get("grade_scorecard") or {h: grade_scorecard(h) for h in HORIZONS},
+        "catalyst_components": _cache.get("catalyst_components") or catalyst_components(5),
+        "evidence_weights_matrix": _cache.get("evidence_weights_matrix"),
     }

@@ -39,7 +39,8 @@ def init_db():
         for col, decl in (("tilt_factor", "REAL"), ("regime_label", "TEXT"),
                           ("rank_score", "REAL"), ("bucket_scores", "TEXT"),
                           ("coiled_score", "REAL"), ("smad_score", "REAL"), ("smad_state", "TEXT"),
-                          ("setup_grade", "TEXT"), ("setup_score", "REAL"), ("setup_type", "TEXT")):
+                          ("setup_grade", "TEXT"), ("setup_score", "REAL"), ("setup_type", "TEXT"),
+                          ("setup_plan", "TEXT")):
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_snapshots ADD COLUMN {col} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_date ON scan_snapshots(scan_date)")
@@ -136,22 +137,43 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 continue
             price = stock.get("quote", {}).get("price", 0) if stock.get("quote") else 0
             tilt = (stock.get("tilt") or {}).get("factor")
-            # Per-bucket raw scores (JSON) — the inputs to evidence-based weighting
+            # Per-bucket raw scores (JSON) — the inputs to evidence-based weighting.
+            # Enriched (2026-07-02) with catalyst sub-component raws (cat_*) and the
+            # news-attention count, so evaluation can measure WHICH sub-signal
+            # carries catalyst's IC and whether attention peaks mark tops.
             bd = stock.get("breakdown") or {}
-            bucket_scores = json.dumps({
-                b: (bd.get(b) or {}).get("raw") for b in
-                ("fundamentals", "momentum", "catalyst", "insider", "sentiment")
-            }) if bd else None
+            bucket_scores = None
+            if bd:
+                bs = {b: (bd.get(b) or {}).get("raw") for b in
+                      ("fundamentals", "momentum", "catalyst", "insider", "sentiment")}
+                cm = (bd.get("catalyst") or {}).get("metrics") or {}
+                bs["cat_earnings_days"] = cm.get("earnings_days")
+                bs["cat_target_upside"] = cm.get("target_upside")
+                bs["cat_rec_score"] = cm.get("rec_score")
+                bs["cat_n_analysts"] = cm.get("n_analysts")
+                bs["cat_src"] = cm.get("src")
+                sent_comp = (bd.get("sentiment") or {}).get("components") or {}
+                bs["attention"] = sent_comp.get("attention")
+                bucket_scores = json.dumps(bs)
             coiled = (stock.get("coiled") or {}).get("coiled_score")
             smad_obj = stock.get("smad") or {}
             verdict = stock.get("setup") or {}   # conviction.assess() output
+            plan = verdict.get("plan")
+            setup_plan = None
+            if plan:
+                try:
+                    setup_plan = json.dumps({k: plan.get(k) for k in
+                                             ("entry", "stop", "target", "rr", "risk_pct", "entry_type")})[:500]
+                except Exception:
+                    setup_plan = None
             try:
                 c.execute("""
                     INSERT OR IGNORE INTO scan_snapshots
                     (ticker, scan_date, price, composite_score, ml_score, early_score,
                      is_alert, is_ai_pick, tilt_factor, regime_label, rank_score, bucket_scores,
-                     coiled_score, smad_score, smad_state, setup_grade, setup_score, setup_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     coiled_score, smad_score, smad_state, setup_grade, setup_score, setup_type,
+                     setup_plan)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     ticker,
                     scan_date,
@@ -171,6 +193,7 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                     verdict.get("grade"),
                     verdict.get("score"),
                     verdict.get("setup"),
+                    setup_plan,
                 ))
             except Exception:
                 continue
@@ -207,7 +230,7 @@ def get_snapshot_features() -> list:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT ticker, scan_date, composite_score, tilt_factor, rank_score, bucket_scores, "
-            "coiled_score, setup_grade, setup_score, setup_type "
+            "coiled_score, setup_grade, setup_score, setup_type, setup_plan, regime_label "
             "FROM scan_snapshots ORDER BY scan_date ASC"
         ).fetchall()
         return [dict(r) for r in rows]

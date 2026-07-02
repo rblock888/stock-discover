@@ -1,12 +1,30 @@
 """Configuration for the stock discovery tool."""
 
 # --- Scoring weights (must sum to 1.0) ---
+# Reallocated 2026-07-02 from the measured evidence (n=466 @5d): catalyst was the
+# only bucket with positive IC (+0.24); momentum (-0.09) and sentiment (-0.19)
+# measured HARMFUL. Not the naive 100%-catalyst recommendation — the evidence
+# base is only ~3 independent trading days, so this is a shrunk blend with
+# guardrails: clamp any future reallocation to [0.05, 0.50] per bucket, and
+# NEVER delete a bucket key (scorer iterates weights.items(); a removed key
+# stops being persisted to bucket_scores and becomes permanently unmeasurable).
 WEIGHTS = {
-    "fundamentals": 0.30,
-    "momentum": 0.25,
-    "catalyst": 0.20,
+    "catalyst": 0.45,
+    "fundamentals": 0.25,
     "insider": 0.15,
-    "sentiment": 0.10,  # Now news sentiment via yfinance
+    "momentum": 0.10,
+    "sentiment": 0.05,
+}
+WEIGHTS_CHANGED = "2026-07-02"  # evaluation segments pre/post this date
+
+# Dates when a persisted signal's DEFINITION changed — evaluation must not pool
+# rows across a cutover (the same column means different things before/after).
+CUTOVER_DATES = {
+    "weights_reallocation": "2026-07-02",
+    "catalyst_metrics": "2026-07-02",       # cat_* sub-components start persisting
+    "attention_component": "2026-07-02",    # sixth bucket_scores key starts persisting
+    "setup_plan_persistence": "2026-07-02", # full trade plan persisted per snapshot
+    "grade_version_2": "2026-07-02",        # A-gate: sentiment out of n_fund, (cat|sq) required
 }
 
 # --- Universe filters ---

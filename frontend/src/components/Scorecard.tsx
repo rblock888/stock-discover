@@ -303,6 +303,11 @@ function EvidenceWeightsCard({ ew }: { ew: EvidenceWeights }) {
         <>
           <p className="text-[10px] mb-2" style={{ color: "var(--text-muted)" }}>{ew.detail}</p>
           <AccrualBar n={ew.n} need={ew.need ?? 120} />
+          {ew.need_days != null && (
+            <div className="text-[10px] mt-1 tabular-nums" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+              independent days: {ew.n_days_5d ?? 0}/{ew.need_days} @5d · {ew.n_days_10d ?? 0}/{ew.need_days} @10d
+            </div>
+          )}
         </>
       ) : (
         <div className="space-y-1.5">
@@ -325,6 +330,10 @@ function EvidenceWeightsCard({ ew }: { ew: EvidenceWeights }) {
               </div>
             );
           })}
+          <div className="text-[9px] mt-1" style={{ color: "var(--text-muted)" }}>
+            rec = shrunk toward equal weight by data depth, clamped 5–50% per bucket
+            {ew.naive_ic_weights && ` · unshrunk (inflated-n): ${order.map((b) => `${((ew.naive_ic_weights?.[b] ?? 0) * 100).toFixed(0)}%`).join("/")}`}
+          </div>
         </div>
       )}
     </TuningCard>

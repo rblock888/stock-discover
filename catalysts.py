@@ -8,6 +8,10 @@ def _fmp_score(ticker: str) -> dict:
     """Score using FMP API."""
     components = {}
     scores = []
+    # raw sub-component values — persisted per snapshot so evaluation can measure
+    # WHICH part of catalyst carries the IC (the tiered score alone can't say)
+    metrics = {"earnings_days": None, "target_upside": None, "rec_score": None,
+               "n_analysts": None, "src": "fmp"}
 
     quote = fmp.get_quote(ticker)
 
@@ -19,6 +23,8 @@ def _fmp_score(ticker: str) -> dict:
             try:
                 ed = datetime.strptime(e.get("date", ""), "%Y-%m-%d").date()
                 days_away = (ed - datetime.now().date()).days
+                if -5 <= days_away <= 120:
+                    metrics["earnings_days"] = days_away
                 if 0 < days_away <= 30:
                     earnings_score = 90
                     components["earnings"] = f"In {days_away} days"
@@ -41,6 +47,7 @@ def _fmp_score(ticker: str) -> dict:
         avg_target = targets[0].get("targetConsensus", 0) or targets[0].get("targetMean", 0)
         if avg_target and avg_target > 0:
             upside = (avg_target - price) / price
+            metrics["target_upside"] = round(upside, 4)
             if upside > 0.50:
                 target_score = 95
             elif upside > 0.25:
@@ -84,7 +91,7 @@ def _fmp_score(ticker: str) -> dict:
     scores.append(change_score * 0.20)
 
     total = sum(scores)
-    return {"score": round(total, 1), "components": components,
+    return {"score": round(total, 1), "components": components, "metrics": metrics,
             "details": ", ".join(f"{k}: {v}" for k, v in components.items())}
 
 
@@ -99,6 +106,8 @@ def _yf_score(ticker: str) -> dict:
 
     components = {}
     scores = []
+    metrics = {"earnings_days": None, "target_upside": None, "rec_score": None,
+               "n_analysts": info.get("numberOfAnalystOpinions"), "src": "yf"}
 
     # Earnings
     earnings_score = 30
@@ -107,11 +116,14 @@ def _yf_score(ticker: str) -> dict:
         if cal and isinstance(cal, dict):
             ed = cal.get("Earnings Date")
             if ed:
+                # yfinance may return a list/range of dates — take the earliest
                 earnings_date = ed[0] if isinstance(ed, list) else ed
                 if hasattr(earnings_date, "date"):
                     days_away = (earnings_date.date() - datetime.now().date()).days
                 else:
                     days_away = (earnings_date - datetime.now().date()).days
+                if -5 <= days_away <= 120:
+                    metrics["earnings_days"] = days_away
                 if 0 < days_away <= 30:
                     earnings_score = 90
                     components["earnings"] = f"In {days_away} days"
@@ -128,6 +140,7 @@ def _yf_score(ticker: str) -> dict:
     current = info.get("currentPrice") or info.get("regularMarketPrice")
     if target and current and current > 0:
         upside = (target - current) / current
+        metrics["target_upside"] = round(upside, 4)
         if upside > 0.50: target_score = 95
         elif upside > 0.25: target_score = 75
         elif upside > 0: target_score = 55
@@ -141,13 +154,14 @@ def _yf_score(ticker: str) -> dict:
     rec_map = {"strong_buy": 95, "buy": 80, "outperform": 70, "hold": 50, "sell": 10}
     if rec in rec_map:
         rec_score = rec_map[rec]
+        metrics["rec_score"] = rec_score
         components["recommendation"] = rec.replace("_", " ").title()
     scores.append(rec_score * 0.25)
 
     scores.append(50 * 0.20)  # neutral for news
 
     total = sum(scores)
-    return {"score": round(total, 1), "components": components,
+    return {"score": round(total, 1), "components": components, "metrics": metrics,
             "details": ", ".join(f"{k}: {v}" for k, v in components.items())}
 
 

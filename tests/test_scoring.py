@@ -31,7 +31,10 @@ def test_composite_all_covered_is_weighted_average():
 
 
 def test_composite_renormalizes_over_covered_buckets():
-    # only fundamentals (0.30) + momentum (0.25) have data
+    # only fundamentals + momentum have data — read weights from config so this
+    # tests the RENORMALIZATION logic, not a stale snapshot of the weights
+    import config
+    wf, wm = config.WEIGHTS["fundamentals"], config.WEIGHTS["momentum"]
     bs = {
         "fundamentals": _bucket(80),
         "momentum": _bucket(75),
@@ -40,9 +43,9 @@ def test_composite_renormalizes_over_covered_buckets():
         "sentiment": _bucket(50, covered=False),
     }
     r = scorer.composite_score(bs)
-    expected = (80 * 0.30 + 75 * 0.25) / (0.30 + 0.25)
+    expected = (80 * wf + 75 * wm) / (wf + wm)
     assert r["composite"] == pytest.approx(expected, abs=0.1)
-    assert r["coverage"] == pytest.approx(0.55, abs=0.01)
+    assert r["coverage"] == pytest.approx(wf + wm, abs=0.01)
 
 
 def test_composite_nan_score_does_not_poison():
@@ -191,6 +194,75 @@ def test_entry_exit_horizon_and_out_of_range():
     e, x = evaluation._entry_exit(days, closes, "2024-01-02", 3)
     assert e == 11.0 and x == 14.0   # idx1 → idx4
     assert evaluation._entry_exit(days, closes, "2024-01-09", 5) == (None, None)  # past the end
+
+
+# ── evaluation: robust statistics (quarantine, winsorize, daily IC, NW-t) ────
+
+
+def test_quarantine_flags_artifact_returns():
+    rows = [{"ticker": "OK", "snap_day": "2026-06-20", "fwd_return": 0.4},
+            {"ticker": "BAD", "snap_day": "2026-06-20", "fwd_return": 38.1}]  # +3810%
+    kept, flagged = evaluation._quarantine(rows, horizon=10)
+    assert [r["ticker"] for r in kept] == ["OK"]
+    assert flagged[0]["ticker"] == "BAD"
+    # long horizons are exempt (a 60d 4x on a microcap is possible alpha)
+    kept60, flagged60 = evaluation._quarantine(rows, horizon=60)
+    assert len(kept60) == 2 and not flagged60
+
+
+def test_nw_tstat_sane():
+    # constant strong series → decisive t; tiny series → None
+    t = evaluation._nw_tstat([0.3, 0.28, 0.32, 0.29, 0.31, 0.3, 0.27, 0.33], lag=4)
+    assert t is not None and t > 5
+    assert evaluation._nw_tstat([0.3, 0.2], lag=4) is None
+    # sign-alternating noise around zero → |t| small
+    t2 = evaluation._nw_tstat([0.3, -0.3, 0.25, -0.28, 0.31, -0.27, 0.29, -0.3], lag=4)
+    assert t2 is not None and abs(t2) < 2
+
+
+def test_daily_ics_groups_and_min_names(monkeypatch):
+    monkeypatch.setattr(evaluation, "_trading_days", lambda: None)  # accept all dates
+    rows = []
+    # day 1: 10 names, perfectly monotonic (IC = 1)
+    for i in range(10):
+        rows.append(("2026-06-20", float(i), float(i)))
+    # day 2: only 3 names — must be dropped (below MIN_NAMES_PER_DAY)
+    for i in range(3):
+        rows.append(("2026-06-23", float(i), float(-i)))
+    out = evaluation._daily_ics(rows)
+    assert len(out) == 1
+    assert out[0][0] == "2026-06-20" and out[0][1] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_evidence_weights_never_recommends_extreme(monkeypatch):
+    """Even with a wildly one-sided IC picture, the shrunk recommendation stays
+    inside [0.05, 0.50] per bucket — no more 100%-catalyst off a 3-day window."""
+    days = [f"2026-06-{d:02d}" for d in range(2, 28)]
+    rets, feats = [], []
+    for di, day in enumerate(days):
+        for i in range(12):
+            t = f"T{i}"
+            cat = float(i * 8)
+            ret = 0.002 * i + 0.001 * di          # catalyst perfectly predictive
+            rets.append({"ticker": t, "snap_day": day, "horizon": 5,
+                         "fwd_return": ret, "excess_return": ret})
+            feats.append({"ticker": t, "scan_date": day,
+                          "bucket_scores": json.dumps({
+                              "fundamentals": 50.0, "momentum": 50.0, "catalyst": cat,
+                              "insider": 50.0, "sentiment": 50.0}),
+                          "composite_score": 50.0, "tilt_factor": None, "rank_score": None,
+                          "coiled_score": None, "setup_grade": None, "setup_score": None,
+                          "setup_type": None, "setup_plan": None, "regime_label": None})
+    monkeypatch.setattr(db, "get_snapshot_returns", lambda h=None: rets)
+    monkeypatch.setattr(db, "get_snapshot_features", lambda: feats)
+    monkeypatch.setattr(evaluation, "_trading_days", lambda: None)
+    out = evaluation.evidence_weights(5)
+    for b, w in out["shrunk_weights"].items():
+        assert 0.04 <= w <= 0.51, f"{b} weight {w} escaped the clamp"
+    assert sum(out["shrunk_weights"].values()) == pytest.approx(1.0, abs=0.02)
+
+
+import json
 
 
 # ── evaluation: grade_scorecard — does conviction grade predict returns? ─────
@@ -582,6 +654,51 @@ def test_conviction_no_plan_is_watch():
                  "profile": {"position": "inside"}, "plan": None, "context": {"ret_20d": 3}},
     }
     assert conviction.assess(stock, _RISK_ON)["grade"] == "WATCH"
+
+
+def test_conviction_a_requires_live_driver_and_ignores_sentiment():
+    """v2 A-gate: sentiment (measured IC -0.19) no longer counts toward n_fund,
+    and grade A needs a live catalyst>=60 or squeeze>=60 driver."""
+    base = {
+        "composite": 64, "calibrated_p_win": 0.42, "quote": {"market_cap": 6e8},
+        "tilt": {"factor": 1.12},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    # fundamentals + insider pass n_fund>=2, but NO catalyst/squeeze driver → not A
+    no_driver = {**base, "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70},
+                                       "catalyst": {"raw": 40}, "sentiment": {"raw": 90}}}
+    v1 = conviction.assess(no_driver, _RISK_ON)
+    assert v1["grade"] != "A"
+    # same setup WITH a live catalyst → A allowed
+    with_driver = {**base, "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70},
+                                         "catalyst": {"raw": 75}, "sentiment": {"raw": 10}}}
+    v2 = conviction.assess(with_driver, _RISK_ON)
+    assert v2["grade"] == "A"
+    # sentiment 90 must not be counted in the fundamental confluence group
+    sent_fac = next(f for f in v1["confluence"]["factors"] if f["label"] == "Positive sentiment")
+    assert sent_fac["group"] == "info"
+
+
+def test_conviction_earnings_proximity_caution():
+    stock = {
+        "composite": 64, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70},
+                      "catalyst": {"raw": 75, "metrics": {"earnings_days": 6}}},
+        "tilt": {"factor": 1.12},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert any("earnings within 6d" in c for c in v["cautions"])
 
 
 def test_conviction_no_bottoming_label_on_active_markup():

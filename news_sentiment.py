@@ -37,6 +37,7 @@ def score(ticker: str) -> dict:
     older_articles = []
     publishers = set()
     sentiments = []
+    n_dated_recent = 0  # articles with a REAL parsed timestamp in the last 14d
 
     for item in news[:30]:
         try:
@@ -55,12 +56,15 @@ def score(ticker: str) -> dict:
                     pass
             if not pub_time and "providerPublishTime" in item:
                 pub_time = datetime.fromtimestamp(item["providerPublishTime"])
+            dated = pub_time is not None
             if not pub_time:
                 pub_time = now - timedelta(days=7)  # assume recent
 
             if pub_time > cutoff_older:
                 if pub_time > cutoff_recent:
                     recent_articles.append({"title": title, "summary": summary})
+                    if dated:
+                        n_dated_recent += 1
                 else:
                     older_articles.append({"title": title, "summary": summary})
 
@@ -113,8 +117,14 @@ def score(ticker: str) -> dict:
 
     total = sum(scores)
 
+    # Attention: coverage VOLUME only, from articles with a real parsed timestamp
+    # (excludes the assume-7-days-ago fallback). Persisted separately so its IC
+    # can be measured — the hypothesis is attention peaks mark tops, like the
+    # sentiment bucket's measured -0.19 IC.
+    components["attention"] = min(100, n_dated_recent * 10)
+
     return {
         "score": round(total, 1),
         "components": components,
-        "details": ", ".join(f"{k}: {v}" for k, v in components.items()),
+        "details": ", ".join(f"{k}: {v}" for k, v in components.items() if k != "attention"),
     }

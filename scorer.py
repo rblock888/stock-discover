@@ -41,6 +41,7 @@ def composite_score(bucket_scores: dict, weights: dict = None) -> dict:
             "covered": covered,
             "details": bucket_data.get("details", ""),
             "components": components,
+            "metrics": bucket_data.get("metrics"),  # raw sub-values (catalyst etc.) — inert if absent
         }
         if covered:
             weighted_total += raw * weight

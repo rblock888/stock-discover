@@ -16,6 +16,15 @@ not one without the other. A grade is only as good as the trade plan under it, s
 each verdict carries a concrete entry / stop / target / R:R.
 """
 
+# Bump when the grading RULES change, so grade_scorecard never pools grades
+# minted under different regimes of logic. v2 (2026-07-02): sentiment moved out
+# of the counted fundamental group (measured IC -0.19 — the strongest anti-
+# signal we have was literally incrementing the A-gate), and grade A now
+# requires a live catalyst (>=60) or squeeze fuel (>=60) — the only measured
+# positive drivers. Funnel check: if <2 A-grades/week over 3 weeks, loosen the
+# catalyst clause to >=55 before touching anything else.
+GRADE_VERSION = 2
+
 
 def _f(x, d=0.0):
     try:
@@ -117,7 +126,9 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         fac("Catalyst", "fundamental", cat >= 60, f"{cat:.0f}/100"),
         fac("Insider / ownership", "fundamental", ins >= 55, f"{ins:.0f}/100"),
         fac("Squeeze fuel", "fundamental", sq >= 60, f"{sq:.0f}/100"),
-        fac("Positive sentiment", "fundamental", sent >= 55, f"{sent:.0f}/100"),
+        # sentiment measured at IC -0.19 (the strongest ANTI-signal) — shown on the
+        # checklist for information but no longer counted toward any grade gate
+        fac("Positive sentiment", "info", sent >= 55, f"{sent:.0f}/100"),
         # CONTEXT
         fac("Regime tailwind", "context", tilt >= 1.05 or mood == "RISK-ON", mood or f"tilt {tilt:.2f}"),
         fac("Liquidity OK", "context", flow != "THIN", flow or ""),
@@ -162,7 +173,11 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
     # watch-only setup (no tight entry) tops out at B no matter how it scores. ──
     rr = _f(plan.get("rr")) if plan else None
     actionable = bool(plan) and rr >= 1.8
-    if actionable and n_tech >= 3 and n_fund >= 2 and n_ctx >= 1:
+    # A additionally requires a LIVE driver: catalyst >=60 (the only bucket with
+    # measured positive IC, +0.24) or squeeze fuel >=60 (coverage-independent —
+    # a hard catalyst-only gate would exclude uncovered biotech/photonics names
+    # whose yfinance catalyst score caps at 44 with no analyst coverage).
+    if actionable and n_tech >= 3 and n_fund >= 2 and (cat >= 60 or sq >= 60) and n_ctx >= 1:
         grade = "A"
     elif n_tech >= 2 and n_fund >= 1:
         grade = "B"
@@ -170,6 +185,13 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         grade = "C"
 
     cautions = []
+
+    # ── Earnings proximity (caution only — the hard gate ships once its kill
+    # criterion has data): a binary event inside the trade's horizon ──
+    cat_metrics = (stock.get("breakdown", {}).get("catalyst", {}) or {}).get("metrics") or {}
+    earnings_days = cat_metrics.get("earnings_days")
+    if cat >= 60 and earnings_days is not None and 0 <= earnings_days <= 14:
+        cautions.append(f"earnings within {earnings_days}d — binary event risk")
 
     # ── R:R floor (audit): a plan that pays under 1.5R can't be an actionable buy ──
     if plan and rr < 1.5:

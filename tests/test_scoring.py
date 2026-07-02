@@ -556,23 +556,80 @@ def test_book_ema_stack_bullish_on_uptrend():
 import setup_backtest
 
 
-def test_backtest_simulate_win_loss_timeout():
-    # win: target 12 reached before stop 9
-    h = np.array([10, 10.5, 12.2, 13.0])
-    l = np.array([10, 9.8, 11.0, 12.0])
-    c = np.array([10, 10.2, 12.0, 12.5])
-    assert setup_backtest._simulate(h, l, c, 0, 10.0, 9.0, 12.0) == pytest.approx(2.0)
-    # loss: stop 9 hit
-    h2 = np.array([10, 10.2, 10.1, 10.0])
-    l2 = np.array([10, 8.9, 9.5, 9.4])
-    c2 = np.array([10, 9.0, 9.6, 9.5])
-    assert setup_backtest._simulate(h2, l2, c2, 0, 10.0, 9.0, 12.0) == pytest.approx(-1.0)
-    # timeout: marked to last close (10.5 → +0.5R on 1.0 risk)
-    h3 = np.array([10, 10.4, 10.5, 10.6])
-    l3 = np.array([10, 9.7, 9.8, 9.9])
-    c3 = np.array([10, 10.3, 10.4, 10.5])
-    r = setup_backtest._simulate(h3, l3, c3, 0, 10.0, 9.0, 12.0)
-    assert r == pytest.approx(0.5, abs=0.2)
+def test_backtest_tradeable_fill_at_next_open():
+    """'now' plans fill at the NEXT bar's open, not the signal close; the
+    tradeable R is measured from that fill (with slippage), exact leg from plan."""
+    o = np.array([10.0, 10.2, 11.0, 12.5])
+    h = np.array([10.0, 10.5, 12.2, 13.0])
+    l = np.array([10.0, 10.0, 11.0, 12.0])
+    c = np.array([10.0, 10.2, 12.0, 12.5])
+    sim = setup_backtest._simulate(o, h, l, c, 0, 10.0, 9.0, 12.0, entry_type="now", atr=0.5)
+    assert sim["outcome"] == "target"
+    assert sim["fill"] == pytest.approx(10.2)          # next open, not 10.0
+    assert sim["r_exact"] == pytest.approx(2.0)        # idealized leg preserved
+    # tradeable R < exact R: worse fill + slippage both charged
+    assert sim["r"] < sim["r_exact"]
+
+
+def test_backtest_skips_gapped_entries():
+    """A next-open that gaps through the stop, or drifts >3% from the plan
+    entry, is a skipped trade — not a fantasy fill."""
+    o = np.array([10.0, 8.8, 9.0, 9.2])   # gaps below the 9.0 stop
+    h = np.array([10.0, 9.5, 9.5, 9.5])
+    l = np.array([10.0, 8.5, 8.8, 9.0])
+    c = np.array([10.0, 9.0, 9.2, 9.3])
+    sim = setup_backtest._simulate(o, h, l, c, 0, 10.0, 9.0, 12.0, entry_type="now", atr=0.5)
+    assert sim["outcome"] == "skipped_gap" and sim["r"] is None
+    assert sim["r_exact"] is not None                  # exact leg still recorded
+    o2 = np.array([10.0, 10.5, 11.0, 12.5])            # +5% drift off plan entry
+    sim2 = setup_backtest._simulate(o2, h, l, c, 0, 10.0, 9.0, 12.0, entry_type="now", atr=0.5)
+    assert sim2["outcome"] == "skipped_gap"
+
+
+def test_backtest_pullback_only_fills_if_touched():
+    """The phantom-fill bug: a pullback limit BELOW the market must not fill
+    unless price actually returns to it."""
+    # price runs away — limit at 9.5 never touched
+    o = np.array([10.0, 10.2, 10.8, 11.5, 12.0, 12.5, 13.0])
+    h = np.array([10.0, 10.5, 11.2, 12.0, 12.5, 13.0, 13.5])
+    l = np.array([10.0, 10.0, 10.5, 11.2, 11.8, 12.2, 12.8])
+    c = np.array([10.0, 10.4, 11.0, 11.8, 12.3, 12.8, 13.2])
+    sim = setup_backtest._simulate(o, h, l, c, 0, 9.5, 9.0, 12.0, entry_type="pullback", atr=0.5)
+    assert sim["outcome"] == "unfilled" and sim["r"] is None
+    # price comes back and touches the limit intrabar -> fills AT the limit
+    l2 = np.array([10.0, 9.4, 10.5, 11.2, 11.8, 12.2, 12.8])
+    sim2 = setup_backtest._simulate(o, h, l2, c, 0, 9.5, 9.0, 12.0, entry_type="pullback", atr=0.5)
+    assert sim2["outcome"] == "target"
+    assert sim2["fill"] == pytest.approx(9.5)
+
+
+def test_backtest_gap_exit_at_open_not_stop():
+    """An overnight gap through the stop exits at the OPEN — the real loss is
+    bigger than -1R. The old simulator pretended you got the stop price."""
+    o = np.array([10.0, 10.1, 8.0, 8.2])   # bar 2 gaps far below the 9.0 stop
+    h = np.array([10.0, 10.3, 8.5, 8.5])
+    l = np.array([10.0, 9.9, 7.8, 8.0])
+    c = np.array([10.0, 10.0, 8.2, 8.3])
+    sim = setup_backtest._simulate(o, h, l, c, 0, 10.0, 9.0, 12.0, entry_type="now", atr=0.5)
+    assert sim["outcome"] == "stop"
+    assert sim["r"] < -1.5                  # much worse than the -1R fiction
+
+
+def test_backtest_wilson_ci_and_expectancy_lb():
+    """Small samples get honest uncertainty: 5-of-6 wins → wide Wilson CI, and
+    setups sort by lower-bound expectancy, not the raw mean."""
+    trades = ([{"setup": "TinyN", "r": 1.0, "r_exact": 1.0, "outcome": "target",
+                "mfe_r": 1.0, "mae_r": -0.2}] * 5 +
+              [{"setup": "TinyN", "r": -1.0, "r_exact": -1.0, "outcome": "stop",
+                "mfe_r": 0.1, "mae_r": -1.0}] +
+              [{"setup": "BigN", "r": 0.3, "r_exact": 0.3, "outcome": "target",
+                "mfe_r": 0.5, "mae_r": -0.1}] * 100)
+    agg = setup_backtest._aggregate(trades)
+    by = {r["setup"]: r for r in agg["by_setup"]}
+    lo, hi = by["TinyN"]["win_ci"]
+    assert lo < 50 and hi > 90                      # 5/6 is compatible with a coin flip
+    assert by["BigN"]["expectancy_lb"] > by["TinyN"]["expectancy_lb"]
+    assert agg["by_setup"][0]["setup"] == "BigN"    # lb-sort puts the real sample first
 
 
 # ── conviction: the synthesized verdict ──────────────────────────────────────

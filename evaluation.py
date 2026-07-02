@@ -27,7 +27,14 @@ import price_history
 logger = logging.getLogger("discovery")
 
 HORIZONS = [5, 10, 20, 60]      # trading days
-WIN_THRESHOLD = 0.10            # "win" = +10% forward return
+WIN_THRESHOLD = 0.10            # legacy 20d bar (kept for back-compat in tests)
+# A "+10% in 5 days" bar is a lottery ticket, not a win-rate — scale the bar
+# with horizon: 0.10 * sqrt(h/20), rounded to the nearest percent.
+WIN_THRESHOLDS = {5: 0.05, 10: 0.07, 20: 0.10, 60: 0.17}
+
+
+def win_threshold(horizon: int) -> float:
+    return WIN_THRESHOLDS.get(horizon, round(0.10 * math.sqrt(horizon / 20.0), 2))
 SIGNALS = ["composite_score", "ml_score", "early_score"]
 BUCKETS = ["fundamentals", "momentum", "catalyst", "insider", "sentiment"]
 
@@ -305,7 +312,7 @@ def _nw_tstat(series: list, lag: int) -> float | None:
 # ── Scorecard ─────────────────────────────────────────────────────────────────
 
 def _decile_table(scores: np.ndarray, rets: np.ndarray, excess: np.ndarray, n_bins=10,
-                  lo=None, hi=None) -> list:
+                  lo=None, hi=None, wt=WIN_THRESHOLD) -> list:
     """Bin by score; per bin report count, avg/median/winsorized return, win-rate.
     Raw mean stays visible (the fat right tail IS the strategy) but median and
     the pooled-winsorized mean are the decision-driving columns."""
@@ -328,7 +335,7 @@ def _decile_table(scores: np.ndarray, rets: np.ndarray, excess: np.ndarray, n_bi
             "median_return_pct": round(float(np.median(rt[idx])) * 100, 2),
             "wmean_return_pct": _wmean_pct(rt[idx], lo, hi),
             "avg_excess_pct": round(float(ex[idx].mean()) * 100, 2) if not np.isnan(ex[idx]).all() else None,
-            "win_rate": round(float((rt[idx] >= WIN_THRESHOLD).mean()) * 100, 1),
+            "win_rate": round(float((rt[idx] >= wt).mean()) * 100, 1),
             "beat_spy_rate": round(float((ex[idx] > 0).mean()) * 100, 1) if not np.isnan(ex[idx]).all() else None,
         })
     return out
@@ -349,6 +356,7 @@ def scorecard(horizon: int = 20) -> dict:
     rets = np.array([d["fwd_return"] for d in data], dtype=float)
     excess = np.array([d["excess_return"] if d["excess_return"] is not None else np.nan for d in data], dtype=float)
     lo, hi = _clip_bounds(rets)
+    wt = win_threshold(horizon)
 
     signals = {}
     for field in ("composite_score", "ml_score"):
@@ -364,7 +372,7 @@ def scorecard(horizon: int = 20) -> dict:
         dics = _daily_ics([(data[i]["snap_day"], sc[i], rets[i]) for i in np.where(m)[0]])
         ic_vals = [v for _, v in dics]
         t_nw = _nw_tstat(ic_vals, lag=horizon - 1)
-        table = _decile_table(scm, rtm, exm, lo=lo, hi=hi)
+        table = _decile_table(scm, rtm, exm, lo=lo, hi=hi, wt=wt)
         top, bot = table[-1], table[0]
         signals[field] = {
             "ic": round(ic, 3),
@@ -388,46 +396,107 @@ def scorecard(horizon: int = 20) -> dict:
         "n": len(data),
         "n_excluded": len(flagged),
         "outliers_flagged": flagged[:10],
+        "win_threshold": wt,
         "overall_avg_return_pct": round(float(np.nanmean(rets)) * 100, 2),
         "overall_median_return_pct": round(float(np.nanmedian(rets)) * 100, 2),
         "overall_wmean_return_pct": _wmean_pct(rets, lo, hi),
-        "overall_win_rate": round(float((rets >= WIN_THRESHOLD).mean()) * 100, 1),
+        "overall_win_rate": round(float((rets >= wt).mean()) * 100, 1),
         "overall_beat_spy_rate": round(float((excess > 0).mean()) * 100, 1) if not np.isnan(excess).all() else None,
         "signals": signals,
     }
 
 
-def calibration(signal: str = "composite_score", horizon: int = 20, n_bins: int = 12) -> dict:
-    """Isotonic map raw score → measured P(forward return ≥ WIN_THRESHOLD)."""
+MIN_N_CALIBRATION = 120
+CAL_SHRINK_N = 25   # served bins shrink toward the base rate by this pseudo-count
+
+
+def _signal_values(data: list, signal: str) -> np.ndarray:
+    """Signal per return-row. Plain column names read straight off the row;
+    'bucket:<name>' resolves per-BUCKET raw scores via the snapshot join
+    (snapshot_returns has no bucket columns — a naive column swap silently
+    no-ops, which is how the catalyst calibration was almost mis-built)."""
+    if not signal.startswith("bucket:"):
+        return np.array([d.get(signal) if d.get(signal) is not None else np.nan
+                         for d in data], dtype=float)
+    bucket = signal.split(":", 1)[1]
+    feats = _feature_lookup()
+    vals = []
+    for d in data:
+        f = feats.get((d["ticker"], d["snap_day"]))
+        v = None
+        if f and f.get("bucket_scores"):
+            try:
+                v = json.loads(f["bucket_scores"]).get(bucket)
+            except Exception:
+                v = None
+        vals.append(v if v is not None else np.nan)
+    return np.array(vals, dtype=float)
+
+
+def calibration(signal: str = "composite_score", horizon: int = 20, n_bins: int = 12,
+                target: str = "win") -> dict:
+    """Isotonic map raw score → measured P(outcome) at this horizon.
+
+    target 'win'      = P(fwd_return >= win_threshold(horizon))
+    target 'beat_spy' = P(excess_return > 0)
+    Served bin probabilities are SHRUNK toward the base rate by a 25-row
+    pseudo-count so a thin bin can't serve an extreme probability."""
     data = db.get_snapshot_returns(horizon)
     if not data:
         return {"available": False}
-    sc = np.array([d.get(signal) if d.get(signal) is not None else np.nan for d in data], dtype=float)
-    rt = np.array([d["fwd_return"] for d in data], dtype=float)
+    data, _ = _quarantine(data, horizon)
+    wt = win_threshold(horizon)
+    sc = _signal_values(data, signal)
+    if target == "beat_spy":
+        y_raw = np.array([d["excess_return"] if d["excess_return"] is not None else np.nan
+                          for d in data], dtype=float)
+        rt = y_raw
+        outcome = (y_raw > 0)
+    else:
+        rt = np.array([d["fwd_return"] for d in data], dtype=float)
+        outcome = (rt >= wt)
     m = ~np.isnan(sc) & ~np.isnan(rt)
-    if m.sum() < 20:
-        return {"available": False, "n": int(m.sum())}
-    sc, win = sc[m], (rt[m] >= WIN_THRESHOLD).astype(float)
-    xs, fit = _isotonic(sc, win)
+    if m.sum() < MIN_N_CALIBRATION:
+        return {"available": False, "n": int(m.sum()), "need": MIN_N_CALIBRATION}
+    sc_m, win = sc[m], outcome[m].astype(float)
+    base = float(win.mean())
+    xs, fit = _isotonic(sc_m, win)
     # Downsample to a small monotonic curve for storage/serving
     bins = np.array_split(np.arange(len(xs)), min(n_bins, len(xs)))
     curve = []
     for idx in bins:
         if len(idx) == 0:
             continue
+        n_bin = int(len(idx))
+        p_fit = float(fit[idx].mean())
+        p_served = (n_bin * p_fit + CAL_SHRINK_N * base) / (n_bin + CAL_SHRINK_N)
         curve.append({
             "score": round(float(xs[idx].mean()), 1),
-            "p_win": round(float(fit[idx].mean()), 3),
-            "n": int(len(idx)),
+            "p_win": round(p_served, 3),
+            "p_fit": round(p_fit, 3),
+            "n": n_bin,
         })
     out = {
-        "available": True, "signal": signal, "horizon": horizon,
-        "win_threshold": WIN_THRESHOLD, "n": int(m.sum()),
-        "base_rate": round(float(win.mean()), 3),
+        "available": True, "signal": signal, "horizon": horizon, "target": target,
+        "win_threshold": wt if target == "win" else None, "n": int(m.sum()),
+        "base_rate": round(base, 3),
         "curve": curve,
     }
-    _cache["calibration"][(signal, horizon)] = out
+    key = (signal, horizon) if target == "win" else (signal, horizon, target)
+    _cache["calibration"][key] = out
     return out
+
+
+def cpw_gate(horizon: int = 5) -> float:
+    """The alert/conviction bar for calibrated P(win): base rate plus a real
+    margin — base + max(0.08, 2*sqrt(base*(1-base)/n)). Re-derives whenever the
+    win threshold or data changes, so a threshold change can't silently flood
+    alerts. Falls back to 0.30 before calibration is ready."""
+    cal = _cache["calibration"].get(("composite_score", horizon))
+    if not cal or not cal.get("available"):
+        return 0.30
+    base, n = cal["base_rate"], max(cal["n"], 1)
+    return round(base + max(0.08, 2.0 * math.sqrt(base * (1 - base) / n)), 3)
 
 
 def calibrated_p_win(score: float, signal: str = "composite_score", horizon: int = 20):
@@ -721,7 +790,7 @@ def tilt_ab(horizon: int = 5) -> dict:
 
 
 def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray,
-                 lo=None, hi=None) -> list:
+                 lo=None, hi=None, wt=WIN_THRESHOLD) -> list:
     """Per-grade breakdown: n / avg / median / winsorized return / win-rate.
     Mirrors _decile_table()'s shape but bins by discrete grade instead of score
     decile, since conviction grade is ordinal/categorical, not continuous."""
@@ -738,7 +807,7 @@ def _grade_table(grades: np.ndarray, rets: np.ndarray, excess: np.ndarray,
             "median_return_pct": round(float(np.median(rt)) * 100, 2),
             "wmean_return_pct": _wmean_pct(rt, lo, hi),
             "avg_excess_pct": round(float(ex.mean()) * 100, 2) if not np.isnan(ex).all() else None,
-            "win_rate": round(float((rt >= WIN_THRESHOLD).mean()) * 100, 1),
+            "win_rate": round(float((rt >= wt).mean()) * 100, 1),
             "beat_spy_rate": round(float((ex > 0).mean()) * 100, 1) if not np.isnan(ex).all() else None,
         })
     return out
@@ -782,7 +851,7 @@ def grade_scorecard(horizon: int = 20) -> dict:
     ordinal = np.array([GRADE_ORDINAL[g] for g in grades[ranked_mask]], dtype=float)
     grade_ic = _spearman(ordinal, fwd[ranked_mask])
 
-    table = _grade_table(grades, fwd, excess, lo=lo, hi=hi)
+    table = _grade_table(grades, fwd, excess, lo=lo, hi=hi, wt=win_threshold(horizon))
     by_grade = {row["grade"]: row for row in table}
 
     # Inversion check — a WORSE grade showing a HIGHER forward excess return than
@@ -807,6 +876,7 @@ def grade_scorecard(horizon: int = 20) -> dict:
 
     return {
         "available": True, "status": "ready", "n": n, "horizon": horizon,
+        "win_threshold": win_threshold(horizon),
         "grade_ic": round(grade_ic, 3), "grades": table,
         "inversion": inversion, "avoid_outperforms_a": avoid_beats_a,
         "detail": "Ordinal grade rank (AVOID=0..A=4) Spearman-correlated against forward return; "
@@ -822,6 +892,10 @@ def refresh(horizons=None) -> dict:
         for h in (horizons or HORIZONS):
             for sig in ("composite_score", "ml_score"):
                 calibration(sig, h)
+                calibration(sig, h, target="beat_spy")
+            # catalyst-bucket calibration: BUILT for measurement, not yet served
+            # to stocks/alerts (WAIT-gated on n>=300 and >=15 snap days)
+            calibration("bucket:catalyst", h)
         _cache["scorecard"] = cards
         # Tuning analyses (auto-activate as the per-bucket / tilt data matures)
         _cache["evidence_weights"] = evidence_weights(5)

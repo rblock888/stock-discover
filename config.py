@@ -25,6 +25,9 @@ CUTOVER_DATES = {
     "attention_component": "2026-07-02",    # sixth bucket_scores key starts persisting
     "setup_plan_persistence": "2026-07-02", # full trade plan persisted per snapshot
     "grade_version_2": "2026-07-02",        # A-gate: sentiment out of n_fund, (cat|sq) required
+    "tier_first_sort": "2026-07-02",        # ranked list sorts grade-tier first, tilt within
+    "tradeable_backtest": "2026-07-02",     # setup stats = realistic fills + slippage
+    "win_thresholds_scaled": "2026-07-02",  # win bar scales with horizon (5%@5d .. 17%@60d)
 }
 
 # --- Universe filters ---

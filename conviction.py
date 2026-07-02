@@ -38,7 +38,8 @@ def _raw(stock, bucket):
     return _f((stock.get("breakdown", {}).get(bucket, {}) or {}).get("raw"))
 
 
-def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = None) -> dict:
+def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = None,
+           cpw_gate: float = 0.30) -> dict:
     coiled = stock.get("coiled") or {}
     smad = stock.get("smad") or {}
     edge = stock.get("edge") or {}
@@ -132,7 +133,9 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         # CONTEXT
         fac("Regime tailwind", "context", tilt >= 1.05 or mood == "RISK-ON", mood or f"tilt {tilt:.2f}"),
         fac("Liquidity OK", "context", flow != "THIN", flow or ""),
-        fac("Measured win-rate", "context", cpw is not None and cpw >= 0.30, f"{cpw*100:.0f}%" if cpw is not None else ""),
+        # gate re-derives from the live calibration base rate (evaluation.cpw_gate)
+        # so a win-threshold change can't silently flood this factor
+        fac("Measured win-rate", "context", cpw is not None and cpw >= cpw_gate, f"{cpw*100:.0f}%" if cpw is not None else ""),
     ]
     n_tech = sum(1 for f in factors if f["group"] == "technical" and f["passed"])
     n_fund = sum(1 for f in factors if f["group"] == "fundamental" and f["passed"])
@@ -236,15 +239,25 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         grade = "WATCH"
         score = min(score, 50)
 
-    # ── Close the loop: demote setups the HISTORICAL backtest says don't work ──
+    # ── Close the loop: demote setups the HISTORICAL backtest says don't work.
+    # avg_r is now the TRADEABLE leg (realistic fills + slippage); "strong edge"
+    # requires the LOWER-BOUND expectancy ≥ 0.05, not a raw small-n mean ──
     stat = (setup_stats or {}).get(setup)
     if stat and stat.get("n", 0) >= 30:
         ar = _f(stat.get("avg_r"))
         if ar < -0.05:
-            cautions.append(f"weak measured edge ({ar:+.2f}R, n={stat['n']})")
+            cautions.append(f"weak measured edge ({ar:+.2f}R tradeable, n={stat['n']})")
             grade = {"A": "B", "B": "C", "C": "C"}.get(grade, grade)
-        elif ar >= 0.20:
-            cautions.append(f"strong measured edge ({ar:+.2f}R, {stat.get('win_rate')}% win)")
+        elif _f(stat.get("expectancy_lb"), -9) >= 0.05:
+            cautions.append(f"strong measured edge ({ar:+.2f}R, lb {_f(stat.get('expectancy_lb')):+.2f}, "
+                            f"{stat.get('win_rate')}% win)")
+    # demotion cap with hysteresis (state computed in setup_backtest: n>=50 and
+    # shrunk tradeable expectancy < 0.03; released only above 0.07)
+    if stat and stat.get("capped"):
+        cautions.append("no measured edge — shrunk tradeable expectancy below cap")
+        if grade == "A":
+            grade = "B"
+        score = min(score, 65)
 
     # thesis: setup + confluence + the most informative passing factor
     lead = next((f for f in factors if f["passed"] and f["group"] == "fundamental"), None) \

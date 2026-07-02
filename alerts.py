@@ -106,7 +106,7 @@ def _format_stock(stock: dict) -> str:
     # Composite + the MEASURED win-rate (calibrated), not the fabricated "AI %"
     score_line = f"📊 Composite *{composite:.0f}*"
     if cpw is not None:
-        score_line += f"  · Measured win *{cpw * 100:.0f}%* (5d)"
+        score_line += f"  · Measured P(+5% in 5d) *{cpw * 100:.0f}%*"
     lines.append(score_line)
 
     # Plain-language regime gauges
@@ -146,8 +146,17 @@ def _is_high_conviction(stock: dict) -> bool:
 
     cpw = stock.get("calibrated_p_win")
     if cpw is not None:
-        return cpw >= 0.30  # measurably above the ~0.22 base rate
-    return stock.get("composite", 0) >= 68  # fallback until calibration is ready
+        try:
+            import evaluation
+            gate = evaluation.cpw_gate(5)   # base rate + real margin, re-derives live
+        except Exception:
+            gate = 0.30
+        return cpw >= gate
+    # fallback until calibration is ready: the graded verdict + the one bucket
+    # with measured positive IC — NOT the noise composite (IC +0.016)
+    grade = (stock.get("setup") or {}).get("grade")
+    cat = ((stock.get("breakdown") or {}).get("catalyst") or {}).get("raw") or 0
+    return grade in ("A", "B") and cat >= 60
 
 
 def alert_new_pick(stock: dict, alert_type: str = "ai_pick") -> bool:
@@ -176,8 +185,11 @@ def alert_new_pick(stock: dict, alert_type: str = "ai_pick") -> bool:
     return False
 
 
-def alert_coiled(stock: dict, kind: str) -> bool:
-    """Alert on a fresh pre-breakout setup: a loaded coil or a breakout trigger."""
+def alert_coiled(stock: dict, kind: str, bypass: bool = False) -> bool:
+    """Alert on a fresh pre-breakout setup: a loaded coil or a breakout trigger.
+    `bypass` tags alerts sent past the normal 3-slot cap (hot-catalyst A/B rule)
+    so their forward returns can be scored separately — kill-switch at n>=30 if
+    their 10d win-rate trails the baseline."""
     ticker = stock.get("ticker")
     if not ticker:
         return False
@@ -193,7 +205,8 @@ def alert_coiled(stock: dict, kind: str) -> bool:
 
     body = f"{header}\n\n{_format_stock(stock)}{detail}"
     if _send(body):
-        db.log_alert(ticker, kind, {"coiled_score": c.get("coiled_score")})
+        db.log_alert(ticker, kind, {"coiled_score": c.get("coiled_score"), "bypass": bypass,
+                                    "catalyst": ((stock.get("breakdown") or {}).get("catalyst") or {}).get("raw")})
         return True
     return False
 
@@ -248,11 +261,35 @@ def process_scan_results(ranked_stocks: list, ai_picks: list = None):
         alert_new_pick(stock, atype)
 
     # Pre-breakout setups across the whole ranking — catch them before/at launch.
-    breaking = [s for s in ranked_stocks if (s.get("coiled") or {}).get("state") == "BREAKING"]
-    coiled = [s for s in ranked_stocks if (s.get("coiled") or {}).get("state") == "COILED"]
+    # FRESH names only (a name alerted <48h ago used to consume a [:3] slot for
+    # days, silently starving new triggers — the measured binding defect), sorted
+    # by catalyst (the one bucket with measured IC), not composite order.
+    def _cat(s):
+        return ((s.get("breakdown") or {}).get("catalyst") or {}).get("raw") or 0
+
+    def _fresh(state, kind):
+        lst = [s for s in ranked_stocks
+               if (s.get("coiled") or {}).get("state") == state
+               and not db.alert_already_sent(s.get("ticker", ""), kind, within_hours=48)]
+        lst.sort(key=_cat, reverse=True)
+        return lst
+
+    breaking = _fresh("BREAKING", "breakout")
+    sent_breakouts = 0
     for stock in breaking[:3]:
-        alert_coiled(stock, "breakout")
-    for stock in coiled[:3]:
+        if alert_coiled(stock, "breakout"):
+            sent_breakouts += 1
+    # bypass beyond the 3 slots ONLY for the strongest confluence: hot catalyst
+    # (>=70 — 60 is the median, not a bar), graded A/B, and a real-R:R plan.
+    for stock in breaking[3:]:
+        if sent_breakouts >= 5:   # hard cap per scan
+            break
+        v = stock.get("setup") or {}
+        rr = (v.get("plan") or {}).get("rr") or 0
+        if _cat(stock) >= 70 and v.get("grade") in ("A", "B") and rr >= 1.5:
+            if alert_coiled(stock, "breakout", bypass=True):
+                sent_breakouts += 1
+    for stock in _fresh("COILED", "coiled")[:3]:
         alert_coiled(stock, "coiled")
 
     # Check watchlist for big moves

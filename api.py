@@ -168,12 +168,19 @@ def _run_full_pipeline():
         regime_label = (regime_now.get("mood") or {}).get("label") if regime_now.get("available") else None
         ranked_list = [{"ticker": t, **r} for t, r in results.items()]
         setup_stats = _setup_stats_map()  # measured edge per setup type (prior backtest)
+        cpw_gate = evaluation.cpw_gate(5)
         for r in ranked_list:
             tilt = regime_tilt.compute_tilt(r, regime_now)
             r["tilt"] = tilt
             r["rank_score"] = round(r["composite"] * tilt["factor"], 1)
-            r["setup"] = conviction.assess(r, regime_now, setup_stats=setup_stats)  # graded verdict
-        ranked_list.sort(key=lambda x: x["rank_score"], reverse=True)
+            r["setup"] = conviction.assess(r, regime_now, setup_stats=setup_stats,
+                                           cpw_gate=cpw_gate)  # graded verdict
+        # TIER-FIRST sort: the composite (IC +0.016 = noise) no longer decides who
+        # tops the list — the graded verdict does; the tilt-adjusted composite
+        # only orders WITHIN a tier (tilt is the one ordering with measured lift).
+        _TIER = {"A": 0, "B": 0, "WATCH": 1, "C": 1, "—": 1, "AVOID": 2}
+        ranked_list.sort(key=lambda x: (_TIER.get((x.get("setup") or {}).get("grade"), 1),
+                                        -x["rank_score"]))
         alerts = [r["ticker"] for r in ranked_list if r["multi_signal_alert"]]
 
         # Step 4: Detect new tickers vs previous scan
@@ -683,12 +690,16 @@ async def dashboard():
 
 
 def _setup_stats_map():
-    """Compact {setup_type: {win_rate, avg_r, n}} from the historical backtest, so
-    the UI can show each setup's measured edge next to it."""
+    """Compact per-setup stats from the historical backtest (TRADEABLE leg), so
+    the UI can show each setup's measured edge and conviction can demote."""
     bt = setup_backtest.get_cached().get("data")
     if not bt:
         return None
-    return {r["setup"]: {"win_rate": r["win_rate"], "avg_r": r["avg_r"], "n": r["n"]}
+    return {r["setup"]: {"win_rate": r["win_rate"], "avg_r": r["avg_r"], "n": r["n"],
+                         "expectancy_lb": r.get("expectancy_lb"),
+                         "ar_shrunk": r.get("ar_shrunk"),
+                         "capped": r.get("capped"),
+                         "fill_rate": r.get("fill_rate")}
             for r in bt.get("by_setup", [])}
 
 

@@ -286,12 +286,17 @@ def _volume_profile(h, l, c, v, bins=24):
     return {"poc": round(poc, 4), "val": round(val, 4), "vah": round(vah, 4), "position": position}
 
 
-def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
+def _trade_plan(h, l, c, atr, zone, profile, extra_support=None, stop_mult=0.4):
     """Concrete plan: enter at current price, stop below the NEAREST structural
     support (zone low, recent swing low, or a held reclaimed level), target the
     next real resistance. The book's risk rule applies — if the nearest support is
     too far (>~10% / wide risk), there's no tight entry here, so return None rather
-    than a junk R:R."""
+    than a junk R:R.
+
+    stop_mult scales the ATR pad under support — the backtest's stop-width sweep
+    measures which value actually maximizes tradeable expectancy (the 0.4 default
+    produced a 62% stop-hit rate on RBS setups, likely too tight for microcap
+    volatility)."""
     n = len(c)
     if n < 15 or atr <= 0:
         return None
@@ -314,7 +319,8 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
     if not supports:
         return None
     support = max(supports)              # the closest support beneath price
-    stop_now = min(support - 0.4 * atr, float(np.min(l[-3:])) - 0.1 * atr)
+    pad = max(stop_mult * atr, 0.02 * px)   # ATR pad with a 2%-of-price floor
+    stop_now = min(support - pad, float(np.min(l[-3:])) - 0.1 * atr)
     risk_now = px - stop_now
 
     if risk_now > 0 and risk_now / px <= 0.12:
@@ -332,7 +338,7 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
             return None
         zlo = float(min(zone)) if (zone and len(zone) == 2 and zone[0]) else pull
         entry = pull
-        stop = min(zlo, pull) - 0.4 * atr
+        stop = min(zlo, pull) - max(stop_mult * atr, 0.02 * pull)
         entry_type = "pullback"
         if entry <= stop or (entry - stop) / entry > 0.14:
             return None
@@ -362,7 +368,7 @@ def _trade_plan(h, l, c, atr, zone, profile, extra_support=None):
     }
 
 
-def compute(hist, zone=None):
+def compute(hist, zone=None, stop_mults=None):
     """Run all daily-bar book detectors on one OHLCV frame. Never raises."""
     try:
         o = hist["Open"].to_numpy(dtype=float)
@@ -384,7 +390,7 @@ def compute(hist, zone=None):
             "ret_20d": round((px / float(c[-21]) - 1) * 100, 1) if len(c) > 21 else 0.0,
             "ret_60d": round((px / float(c[-61]) - 1) * 100, 1) if len(c) > 61 else 0.0,
         }
-        return {
+        out = {
             "available": True,
             "phase": _market_phase(c, h, l, atr),
             "rbs": rbs,
@@ -395,6 +401,16 @@ def compute(hist, zone=None):
             "reverse_hns": _reverse_hns(h, l, c, atr),
             "context": context,
             "plan": _trade_plan(h, l, c, atr, zone, profile, extra_support=rbs.get("level")),
+            "atr": round(atr, 4),
         }
+        if stop_mults:
+            # the backtest's stop-width sweep: plans for every arm from ONE
+            # detector walk (the detectors don't depend on stop_mult, only the plan)
+            out["plans_by_mult"] = {
+                m: _trade_plan(h, l, c, atr, zone, profile,
+                               extra_support=rbs.get("level"), stop_mult=m)
+                for m in stop_mults
+            }
+        return out
     except Exception:
         return {"available": False}

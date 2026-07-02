@@ -211,6 +211,27 @@ def alert_coiled(stock: dict, kind: str, bypass: bool = False) -> bool:
     return False
 
 
+def alert_intraday_breakout(fired: dict) -> bool:
+    """5-minute watcher trigger: a completed intraday bar closed through the
+    pivot on real volume. Payload is fully instrumented so its own scorecard
+    can kill it (n>=30 with 10d excess <= 0 → watcher disabled)."""
+    ticker = fired.get("ticker")
+    if not ticker:
+        return False
+    if db.alert_already_sent(ticker, "intraday_breakout", within_hours=48):
+        return False
+    body = (
+        f"⚡ *INTRADAY BREAKOUT — ${ticker}*\n\n"
+        f"5m close *${fired['price']:.2f}* through pivot ${fired['pivot_price']:.2f} "
+        f"on *{fired['rvol_prorated']:.1f}x* prorated volume\n"
+        f"⊟ coiled {fired.get('coiled_score', 0):.0f}/100 · daily scan confirms on next pass"
+    )
+    if _send(body):
+        db.log_alert(ticker, "intraday_breakout", fired)
+        return True
+    return False
+
+
 def alert_watchlist_move(ticker: str, old_price: float, new_price: float, item: dict) -> bool:
     """Alert when a watchlist stock moves significantly."""
     if not item:

@@ -406,14 +406,16 @@ def test_prefly_rerank_favors_coiled_over_hyped_extended(monkeypatch):
 
     tickers = ["HYPED", "QUIET"]  # HYPED first by attention
     source_counts = {"HYPED": 5, "QUIET": 1}
-    out = universe_builder._prefly_rerank(tickers, source_counts, limit=10)
+    out, meta = universe_builder._prefly_rerank(tickers, source_counts, limit=10)
     assert out.index("QUIET") < out.index("HYPED")
+    assert meta["QUIET"]["prefly"] > meta["HYPED"]["prefly"]   # components persisted
 
 
 def test_prefly_rerank_never_raises_on_failure(monkeypatch):
     monkeypatch.setattr("price_history.get_histories", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    out = universe_builder._prefly_rerank(["A", "B"], {"A": 1, "B": 1}, limit=10)
+    out, meta = universe_builder._prefly_rerank(["A", "B"], {"A": 1, "B": 1}, limit=10)
     assert out == ["A", "B"]  # unchanged, no crash
+    assert meta == {}
 
 
 # ── api: discovery-quality gates (mega-cap / closed-end fund exclusion) ──────
@@ -632,6 +634,112 @@ def test_backtest_wilson_ci_and_expectancy_lb():
     assert agg["by_setup"][0]["setup"] == "BigN"    # lb-sort puts the real sample first
 
 
+# ── news cache: dilution + event classification ─────────────────────────────
+
+import news_cache
+from datetime import datetime as _dtm, timedelta as _tdelta
+
+
+def _fake_news(monkeypatch, titles_with_age):
+    now = _dtm.now()
+    items = [{"title": t, "summary": "", "publisher": "PRN",
+              "pub_time": now - _tdelta(days=age) if age is not None else None}
+             for t, age in titles_with_age]
+    monkeypatch.setattr(news_cache, "get_news", lambda ticker: items)
+
+
+def test_news_dilution_detected_and_completion_excluded(monkeypatch):
+    _fake_news(monkeypatch, [("XYZ Announces $10M Registered Direct Offering", 2)])
+    assert news_cache.fresh_dilution_headline("XYZ") is not None
+    # a CLOSED offering is behind the stock, not ahead of it
+    _fake_news(monkeypatch, [("XYZ Announces Closing of $10M Offering", 2)])
+    assert news_cache.fresh_dilution_headline("XYZ") is None
+    # stale (>7d) dilution is ignored
+    _fake_news(monkeypatch, [("XYZ Announces Offering", 12)])
+    assert news_cache.fresh_dilution_headline("XYZ") is None
+    # undated headlines are ignored (yfinance recycles stale stories)
+    _fake_news(monkeypatch, [("XYZ Announces Offering", None)])
+    assert news_cache.fresh_dilution_headline("XYZ") is None
+
+
+def test_news_event_classifier(monkeypatch):
+    _fake_news(monkeypatch, [("XYZ Receives FDA Approval for Lead Drug", 1)])
+    assert news_cache.classify_event("XYZ") == 90
+    _fake_news(monkeypatch, [("XYZ Announces Reverse Split", 1)])
+    assert news_cache.classify_event("XYZ") == 10
+    _fake_news(monkeypatch, [("XYZ Appoints VP of Sales", 1)])
+    assert news_cache.classify_event("XYZ") == 50
+
+
+def test_conviction_dilution_forces_watch():
+    stock = {
+        "composite": 64, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70}, "catalyst": {"raw": 75}},
+        "tilt": {"factor": 1.12},
+        "news_flags": {"dilution": "Announces $50M At-The-Market Program"},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] == "WATCH"
+    assert any("dilution" in c for c in v["cautions"])
+    assert v["plan"] is not None    # plan stays visible — "not yet", not "never"
+
+
+def test_conviction_imminent_earnings_forces_watch():
+    stock = {
+        "composite": 64, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70},
+                      "catalyst": {"raw": 75, "metrics": {"earnings_days": 2}}},
+        "tilt": {"factor": 1.12},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] == "WATCH"
+    assert any("enter after the print" in c for c in v["cautions"])
+
+
+# ── intraday watcher: trigger rules ──────────────────────────────────────────
+
+import intraday_watch
+from zoneinfo import ZoneInfo as _ZI
+
+
+def _fake_5m(closes, vols):
+    idx = pd.date_range("2026-07-02 09:30", periods=len(closes), freq="5min")
+    return pd.DataFrame({"Close": closes, "Volume": vols,
+                         "Open": closes, "High": closes, "Low": closes}, index=idx)
+
+
+def test_intraday_trigger_needs_completed_close_and_rvol(monkeypatch):
+    monkeypatch.setattr(db, "alert_already_sent", lambda *a, **k: False)
+    intraday_watch.set_hotlist([{"ticker": "T", "pivot_price": 10.0,
+                                 "avg_vol20": 390_000, "coiled_score": 80}])
+    noon = _dtm(2026, 7, 2, 12, 0, tzinfo=_ZI("America/New_York"))
+    # completed bar closes through pivot on heavy volume → fires
+    bars = {"T": _fake_5m([9.9, 10.05, 10.5], [400_000, 400_000, 100])}
+    fired = intraday_watch.check_triggers(bars_by_ticker=bars, now=noon)
+    assert len(fired) == 1 and fired[0]["ticker"] == "T"
+    # only the IN-PROGRESS bar is through the pivot → no fire (wick discipline)
+    bars2 = {"T": _fake_5m([9.9, 9.95, 10.5], [400_000, 400_000, 100])}
+    assert intraday_watch.check_triggers(bars_by_ticker=bars2, now=noon) == []
+    # thin volume → no fire
+    bars3 = {"T": _fake_5m([9.9, 10.05, 10.5], [1_000, 1_000, 100])}
+    assert intraday_watch.check_triggers(bars_by_ticker=bars3, now=noon) == []
+    # before 10:00 ET the prorated-volume math structurally misfires → hold fire
+    early = _dtm(2026, 7, 2, 9, 45, tzinfo=_ZI("America/New_York"))
+    assert intraday_watch.check_triggers(bars_by_ticker=bars, now=early) == []
+
+
 # ── paper ledger: sizing, fills, exit decisions ──────────────────────────────
 
 import paper_ledger
@@ -783,8 +891,10 @@ def test_conviction_a_requires_live_driver_and_ignores_sentiment():
 
 
 def test_conviction_earnings_proximity_caution():
+    """4-10d earnings window: caution always; A demotes to B only when the
+    reward doesn't justify holding through the event (rr < 2.5)."""
     stock = {
-        "composite": 64, "quote": {"market_cap": 6e8},
+        "composite": 64, "calibrated_p_win": 0.42, "quote": {"market_cap": 6e8},
         "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70},
                       "catalyst": {"raw": 75, "metrics": {"earnings_days": 6}}},
         "tilt": {"factor": 1.12},
@@ -796,7 +906,8 @@ def test_conviction_earnings_proximity_caution():
                  "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
     }
     v = conviction.assess(stock, _RISK_ON)
-    assert any("earnings within 6d" in c for c in v["cautions"])
+    assert any("earnings in 6d" in c for c in v["cautions"])
+    assert v["grade"] != "A"    # rr 2.3 < 2.5 → an A here demotes to B
 
 
 def test_conviction_no_bottoming_label_on_active_markup():

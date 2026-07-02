@@ -662,7 +662,8 @@ def evidence_weights(horizon: int = 5) -> dict:
 
 
 CAT_COMPONENTS = ["cat_earnings_days", "cat_target_upside", "cat_rec_score",
-                  "cat_n_analysts", "attention"]
+                  "cat_n_analysts", "attention", "catalyst_event",
+                  "prefly_component", "attention_component"]
 MIN_N_CAT_COMPONENT = 250
 
 
@@ -833,7 +834,13 @@ def grade_scorecard(horizon: int = 20) -> dict:
         f = feats.get((r["ticker"], r["snap_day"]))
         if not f or not f.get("setup_grade"):
             continue
-        rows.append((f["setup_grade"], r["fwd_return"], r["excess_return"]))
+        ed = None
+        if f.get("bucket_scores"):
+            try:
+                ed = json.loads(f["bucket_scores"]).get("cat_earnings_days")
+            except Exception:
+                ed = None
+        rows.append((f["setup_grade"], r["fwd_return"], r["excess_return"], ed))
 
     n = len(rows)
     if n < MIN_N_GRADE:
@@ -874,14 +881,86 @@ def grade_scorecard(horizon: int = 20) -> dict:
         and avoid_row["avg_excess_pct"] > a_row["avg_excess_pct"]
     )
 
+    # earnings-proximity cohorts — the kill data for conviction's earnings gate:
+    # if ed<=3 is NOT worse than 11-30d at n>=100/cohort, the gate was vetoing edge
+    def _cohort(pred):
+        rs = np.array([r[1] for r in rows if pred(r[3])], dtype=float)
+        ex = np.array([r[2] if r[2] is not None else np.nan for r in rows if pred(r[3])], dtype=float)
+        return {"n": len(rs),
+                "avg_return_pct": round(float(rs.mean()) * 100, 2) if len(rs) else None,
+                "avg_excess_pct": round(float(np.nanmean(ex)) * 100, 2) if len(ex) and not np.isnan(ex).all() else None}
+    earnings_cohorts = {
+        "ed_0_3": _cohort(lambda e: e is not None and 0 <= e <= 3),
+        "ed_4_10": _cohort(lambda e: e is not None and 4 <= e <= 10),
+        "ed_11_30": _cohort(lambda e: e is not None and 11 <= e <= 30),
+        "ed_none": _cohort(lambda e: e is None),
+    }
+
     return {
         "available": True, "status": "ready", "n": n, "horizon": horizon,
         "win_threshold": win_threshold(horizon),
+        "earnings_cohorts": earnings_cohorts,
         "grade_ic": round(grade_ic, 3), "grades": table,
         "inversion": inversion, "avoid_outperforms_a": avoid_beats_a,
         "detail": "Ordinal grade rank (AVOID=0..A=4) Spearman-correlated against forward return; "
                   "'—' shown separately, excluded from the correlation.",
     }
+
+
+MIN_N_INTRADAY_KILL = 30   # the watcher's pre-registered kill sample
+
+
+def intraday_scorecard() -> dict:
+    """Forward excess returns (5/10/20d vs SPY) from intraday-breakout alert
+    prices. PRE-REGISTERED KILL: n>=30 alerts with 10d avg excess <= 0 →
+    disable the watcher loop (faster delivery of an unproven trigger is
+    unproven value)."""
+    alerts = db.get_alerts_by_type("intraday_breakout")
+    if not alerts:
+        return {"available": False, "n": 0, "need": MIN_N_INTRADAY_KILL,
+                "detail": "No intraday breakout alerts fired yet."}
+    spy_days, spy_closes = _close_series(price_history.get_history("SPY", period="1y"))
+    rows = []
+    for a in alerts:
+        try:
+            payload = json.loads(a.get("payload") or "{}")
+            price = float(payload.get("price") or 0)
+        except Exception:
+            continue
+        if price <= 0:
+            continue
+        day = (a.get("sent_at") or "")[:10]
+        hist = price_history.get_history(a["ticker"], period="1y")
+        days, closes = _close_series(hist)
+        if days is None:
+            continue
+        row = {"ticker": a["ticker"], "day": day}
+        for h in (5, 10, 20):
+            e, x = _entry_exit(days, closes, day, h)
+            if e is None:
+                row[f"ret_{h}d"] = None
+                continue
+            fwd = x / price - 1.0    # entry at the ALERT price, not the close
+            spy = None
+            if spy_days is not None:
+                se, sx = _entry_exit(spy_days, spy_closes, day, h)
+                if se is not None:
+                    spy = sx / se - 1.0
+            row[f"ret_{h}d"] = round(fwd, 4)
+            row[f"excess_{h}d"] = round(fwd - spy, 4) if spy is not None else None
+        rows.append(row)
+
+    out = {"available": True, "n": len(rows), "need": MIN_N_INTRADAY_KILL}
+    for h in (5, 10, 20):
+        ex = [r.get(f"excess_{h}d") for r in rows if r.get(f"excess_{h}d") is not None]
+        out[f"avg_excess_{h}d_pct"] = round(float(np.mean(ex)) * 100, 2) if ex else None
+        out[f"n_{h}d"] = len(ex)
+    ex10 = [r.get("excess_10d") for r in rows if r.get("excess_10d") is not None]
+    out["kill_triggered"] = bool(len(ex10) >= MIN_N_INTRADAY_KILL and float(np.mean(ex10)) <= 0)
+    out["detail"] = ("KILL CRITERION MET — disable the intraday watcher loop."
+                     if out["kill_triggered"] else
+                     f"Kill check at n>={MIN_N_INTRADAY_KILL} resolved 10d alerts with avg excess <= 0.")
+    return out
 
 
 MIN_N_LEDGER = 50   # below this, the ledger is descriptive only
@@ -973,6 +1052,7 @@ def refresh(horizons=None) -> dict:
         _cache["tilt_ab"] = tilt_ab(5)
         _cache["grade_scorecard"] = {h: grade_scorecard(h) for h in (horizons or HORIZONS)}
         _cache["catalyst_components"] = catalyst_components(5)
+        _cache["intraday_scorecard"] = intraday_scorecard()
         # cross-horizon evidence matrix — is a bucket's IC consistent across 5/10/20/60d?
         matrix = {}
         for h in (horizons or HORIZONS):
@@ -1021,4 +1101,5 @@ def get_cached() -> dict:
         "grade_scorecard": _cache.get("grade_scorecard") or {h: grade_scorecard(h) for h in HORIZONS},
         "catalyst_components": _cache.get("catalyst_components") or catalyst_components(5),
         "evidence_weights_matrix": _cache.get("evidence_weights_matrix"),
+        "intraday_scorecard": _cache.get("intraday_scorecard"),
     }

@@ -61,6 +61,8 @@ import smad
 import book_signals
 import setup_backtest
 import paper_ledger
+import news_cache
+import intraday_watch
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -136,8 +138,24 @@ def _run_full_pipeline():
     cache["scan_in_progress"] = True
 
     try:
-        # Step 1: Discover
-        uni = universe_builder.build_universe()
+        # Step 1: Discover — siloed engines (squeeze screen, photonics seeds)
+        # join through the same validate/rerank funnel as every other source
+        extra = {}
+        try:
+            sq = [r.get("ticker") for r in (squeeze_cache.get("results") or [])[:30] if r.get("ticker")]
+            if sq:
+                extra["squeeze_screen"] = sq
+            ph = []
+            for phase in (photonics_cache.get("phases") or []):
+                for cand in (phase.get("candidates") or []):
+                    t = cand.get("ticker")
+                    if t and t not in ph:
+                        ph.append(t)
+            if ph:
+                extra["photonics_seeds"] = ph[:30]
+        except Exception:
+            pass
+        uni = universe_builder.build_universe(extra_sources=extra or None)
         cache["universe"] = uni
         logger.info(f"Discovered {uni['total']} tickers")
 
@@ -145,23 +163,38 @@ def _run_full_pipeline():
             cache["scan_in_progress"] = False
             return
 
-        # Step 2: Score top 30
-        to_score = uni["tickers"][:40]
+        # Step 2: Score to depth — walk candidates until TARGET_SCORED accepted
+        # or MAX_ATTEMPTS tried (mega-cap/fund skips no longer eat scoring slots).
+        # Deliberately SERIAL: ~2.4-3.1s/ticker ≈ 3-5 min inside a 30-min budget;
+        # parallel yfinance risks rate-limited neutral scores polluting the data.
+        TARGET_SCORED, MAX_ATTEMPTS = 60, 90
+        disc_meta = uni.get("discovery_meta") or {}
         results = {}
-        for i, ticker in enumerate(to_score):
+        attempted = skipped = 0
+        for ticker in uni["tickers"][:MAX_ATTEMPTS]:
+            if len(results) >= TARGET_SCORED:
+                break
+            attempted += 1
             try:
                 result = _score_ticker(ticker)
                 quote = result.get("quote") or {}
                 if _is_mega_cap(quote):
+                    skipped += 1
                     logger.info(f"  Skipped {ticker}: mega-cap (${_num(quote.get('market_cap'))/1e9:.0f}B)")
                     continue
                 if _is_fund_or_trust(quote):
+                    skipped += 1
                     logger.info(f"  Skipped {ticker}: closed-end fund/trust, not an operating company")
                     continue
+                result["discovery"] = disc_meta.get(ticker)
+                if disc_meta.get(ticker, {}).get("feed_hint"):
+                    result["feed_hint"] = disc_meta[ticker]["feed_hint"]
                 results[ticker] = result
-                logger.info(f"  Scored {i+1}/{len(to_score)}: {ticker} = {result['composite']:.1f}")
+                logger.info(f"  Scored {len(results)}/{TARGET_SCORED}: {ticker} = {result['composite']:.1f}")
             except Exception as e:
                 logger.error(f"  Failed {ticker}: {e}")
+        logger.info(f"Scoring depth: accepted={len(results)} skipped={skipped} attempted={attempted}")
+        cache["scan_depth"] = {"accepted": len(results), "skipped": skipped, "attempted": attempted}
 
         # Step 3: Rank — composite tilted by the current regime (bounded, logged).
         # composite is untouched; rank_score = composite × tilt drives ordering.
@@ -251,6 +284,15 @@ def _run_full_pipeline():
                 logger.info(f"Paper ledger: {rep}")
         except Exception as e:
             logger.error(f"Paper ledger pass failed: {e}")
+
+        # ─── Rebuild the intraday watcher's hot list from this scan ───
+        try:
+            hot = intraday_watch.build_hotlist(ranked_list, db.get_watchlist())
+            intraday_watch.set_hotlist(hot)
+            if hot:
+                logger.info(f"Intraday hotlist: {[h['ticker'] for h in hot]}")
+        except Exception as e:
+            logger.error(f"Hotlist rebuild failed: {e}")
 
         # ─── Recompose the daily brief on fresh scan data ───
         _recompose_brief()
@@ -383,6 +425,23 @@ async def _secondary_loop():
             logger.error(f"Secondary scan error: {e}")
 
 
+async def _intraday_loop():
+    """5-minute breakout watcher over the hot list (market hours only).
+
+    Alert-only + instrumented; pre-registered kill at n>=30 alerts with 10d
+    avg excess <= 0 (see intraday_watch docstring)."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            if intraday_watch.in_window():
+                fired = await loop.run_in_executor(pool, intraday_watch.check_triggers)
+                for f in fired:
+                    alerts_module.alert_intraday_breakout(f)
+        except Exception as e:
+            logger.error(f"Intraday watcher error: {e}")
+        await asyncio.sleep(intraday_watch.cycle_seconds() if intraday_watch.in_window() else 15 * 60)
+
+
 async def _background_scanner():
     """Background task that runs the pipeline periodically."""
     loop = asyncio.get_event_loop()
@@ -396,6 +455,7 @@ async def _background_scanner():
     # do NOT wrap in asyncio.create_task (it requires a coroutine and raises).
     _run_secondary_pipelines()
     asyncio.create_task(_secondary_loop())
+    asyncio.create_task(_intraday_loop())
 
     # Backfill forward-return evaluation once at startup (then 6h-gated in the loop)
     loop.run_in_executor(pool, _run_evaluation_pipeline, True)
@@ -562,6 +622,12 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Pre-breakout / coiled-spring detector — catch them BEFORE they fly
     try:
         result["coiled"] = pre_breakout.compute(ticker, hist)
+        # fresh-dilution flag for conviction's event gate (TTL-cached news — the
+        # same fetch news_sentiment/catalysts already made this cycle)
+        try:
+            result["news_flags"] = {"dilution": news_cache.fresh_dilution_headline(ticker)}
+        except Exception:
+            result["news_flags"] = {}
     except Exception:
         result["coiled"] = dict(pre_breakout.UNAVAILABLE)
 

@@ -188,13 +188,38 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         grade = "C"
 
     cautions = []
+    force_watch = False
 
-    # ── Earnings proximity (caution only — the hard gate ships once its kill
-    # criterion has data): a binary event inside the trade's horizon ──
+    # ── Event-risk gates (judgment-call risk control, like the AVOID vetoes —
+    # both logged/persisted with pre-registered kill criteria, not measured edges) ──
     cat_metrics = (stock.get("breakdown", {}).get("catalyst", {}) or {}).get("metrics") or {}
     earnings_days = cat_metrics.get("earnings_days")
-    if cat >= 60 and earnings_days is not None and 0 <= earnings_days <= 14:
+    # (a) earnings inside 3 days: a binary event the plan can't price — watch it,
+    # keep the plan visible, enter after the print. Kill criterion: if the ed<=3
+    # cohort's forward returns are NOT worse than 11-30d at n>=100/cohort, delete.
+    if plan and earnings_days is not None and 0 <= earnings_days <= 3:
+        cautions.append(f"earnings in {earnings_days}d — binary event, enter after the print")
+        force_watch = True
+    # (b) earnings in 4-10 days: an A-grade needs the reward to justify the event
+    elif earnings_days is not None and 4 <= earnings_days <= 10:
+        cautions.append(f"earnings in {earnings_days}d")
+        if grade == "A" and (rr or 0) < 2.5:
+            grade = "B"
+    elif cat >= 60 and earnings_days is not None and 11 <= earnings_days <= 14:
         cautions.append(f"earnings within {earnings_days}d — binary event risk")
+    # (d) pre-revenue biotech: readouts (PDUFA etc.) aren't dated in yfinance —
+    # caution + size-down note only, NO grade cap (this is the core universe)
+    sector = (stock.get("quote") or {}).get("sector") or ""
+    if sector == "Healthcare" and fund < 40:
+        cautions.append("pre-revenue biotech — undated readout risk, size down")
+
+    # fresh dilution headline (computed once per scan in api via news_cache):
+    # a live offering/reverse-split/going-concern is an overhang no technical
+    # setup outruns — cap at WATCH, log the fire for false-positive inspection
+    dilution = (stock.get("news_flags") or {}).get("dilution")
+    if dilution:
+        cautions.append(f'fresh dilution headline: "{dilution[:80]}"')
+        force_watch = True
 
     # ── R:R floor (audit): a plan that pays under 1.5R can't be an actionable buy ──
     if plan and rr < 1.5:
@@ -258,6 +283,13 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         if grade == "A":
             grade = "B"
         score = min(score, 65)
+
+    # event-risk gates that force WATCH (imminent earnings / fresh dilution):
+    # applied LAST so no later adjustment can promote past them; the plan stays
+    # visible — these are "not yet", not "never"
+    if force_watch and grade in ("A", "B", "C"):
+        grade = "WATCH"
+        score = min(score, 55)
 
     # thesis: setup + confluence + the most informative passing factor
     lead = next((f for f in factors if f["passed"] and f["group"] == "fundamental"), None) \

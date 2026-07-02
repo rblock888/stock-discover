@@ -173,6 +173,8 @@ def compute(ticker: str, hist) -> dict:
             "ext_pct": round(ext * 100, 1),
             "ret_3m_pct": round(ret_3m * 100, 1),
             "pivot_prox": round(prox, 3),
+            "pivot_price": round(base_hi, 4),   # the level the intraday watcher arms on
+            "base_lo": round(base_lo, 4),
             "reasons": reasons,
         }
     except Exception:

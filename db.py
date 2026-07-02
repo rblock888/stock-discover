@@ -163,7 +163,7 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
 
     with get_conn() as conn:
         c = conn.cursor()
-        for stock in ranked_stocks[:40]:
+        for stock in ranked_stocks[:60]:   # full scored depth (was 40)
             ticker = stock.get("ticker")
             if not ticker:
                 continue
@@ -184,8 +184,20 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 bs["cat_rec_score"] = cm.get("rec_score")
                 bs["cat_n_analysts"] = cm.get("n_analysts")
                 bs["cat_src"] = cm.get("src")
+                bs["catalyst_event"] = cm.get("event")     # shadow classifier (10/50/90)
+                bs["catalyst_ver"] = cm.get("ver")
                 sent_comp = (bd.get("sentiment") or {}).get("components") or {}
                 bs["attention"] = sent_comp.get("attention")
+                bs["sentiment_ver"] = sent_comp.get("ver")
+                # discovery provenance — which source/feed surfaced this name, and
+                # what the pre-fly rerank saw (per-component IC measurement later)
+                disc = stock.get("discovery") or {}
+                bs["feed_hint"] = disc.get("feed_hint")
+                bs["disc_rank"] = disc.get("rank")
+                bs["disc_sources"] = disc.get("n_sources")
+                bs["prefly_component"] = disc.get("prefly")
+                bs["attention_component"] = disc.get("attention")
+                bs["prefly_state"] = disc.get("state")
                 bucket_scores = json.dumps(bs)
             coiled = (stock.get("coiled") or {}).get("coiled_score")
             smad_obj = stock.get("smad") or {}
@@ -481,3 +493,12 @@ def get_paper_trades(status: str = None, ticker: str = None) -> list:
     q += " ORDER BY id ASC"
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def get_alerts_by_type(alert_type: str, limit: int = 500) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM alerts_sent WHERE alert_type=? ORDER BY sent_at ASC LIMIT ?",
+            (alert_type, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]

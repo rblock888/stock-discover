@@ -69,7 +69,7 @@ REDDIT_SUBREDDITS = [
 REDDIT_LOOKBACK_DAYS = 30
 
 # --- SEC EDGAR ---
-SEC_USER_AGENT = "StockDiscovery research@example.com"  # SEC requires identification
+SEC_USER_AGENT = "StockDiscovery rubenbruijnje@gmail.com"  # SEC requires a real contact
 INSIDER_LOOKBACK_DAYS = 90
 
 # --- Output ---

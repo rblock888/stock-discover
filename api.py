@@ -426,6 +426,42 @@ async def _secondary_loop():
             logger.error(f"Secondary scan error: {e}")
 
 
+def _seconds_until_preopen() -> float:
+    """Seconds until the next weekday 08:45 ET (45 min before the NY open)."""
+    from zoneinfo import ZoneInfo
+    from datetime import timedelta
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    target = now.replace(hour=8, minute=45, second=0, microsecond=0)
+    while target <= now or target.weekday() >= 5:
+        target = (target + timedelta(days=1)).replace(hour=8, minute=45, second=0, microsecond=0)
+    return max(60.0, (target - now).total_seconds())
+
+
+async def _preopen_loop():
+    """Daily pre-open brief: the best-of list on Ruben's phone 45 minutes before
+    the New York open. Runs a fresh scan first so pre-market news (dilution
+    headlines, fresh 8-Ks, earnings dates) is in the grades — daily bars don't
+    move overnight, but the news does."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(_seconds_until_preopen())
+        try:
+            last = cache.get("last_scan")
+            stale = True
+            if last:
+                stale = (datetime.now() - datetime.fromisoformat(last)).total_seconds() > 15 * 60
+            if stale and not cache["scan_in_progress"]:
+                await loop.run_in_executor(pool, _run_full_pipeline)
+            regime = market_regime.get_cached()
+            label = (regime.get("mood") or {}).get("label") if regime.get("available") else None
+            sent = alerts_module.send_preopen_brief(cache.get("ranked") or [], regime_label=label)
+            logger.info(f"Pre-open brief sent: {sent}")
+        except Exception as e:
+            logger.error(f"Pre-open brief failed: {e}")
+        await asyncio.sleep(120)   # step past the trigger minute before re-arming
+
+
 async def _intraday_loop():
     """5-minute breakout watcher over the hot list (market hours only).
 
@@ -457,6 +493,7 @@ async def _background_scanner():
     _run_secondary_pipelines()
     asyncio.create_task(_secondary_loop())
     asyncio.create_task(_intraday_loop())
+    asyncio.create_task(_preopen_loop())
 
     # Backfill forward-return evaluation once at startup (then 6h-gated in the loop)
     loop.run_in_executor(pool, _run_evaluation_pipeline, True)

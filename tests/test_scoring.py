@@ -1064,6 +1064,31 @@ def test_alerts_dispatch_to_pushover(monkeypatch):
     assert calls["data"]["html"] == 1
 
 
+def test_preopen_brief_formatting():
+    ranked = [
+        {"ticker": "GKOS", "setup": {"grade": "A", "setup": "Spring reclaim",
+                                     "plan": {"entry": 25.1, "stop": 24.2, "target": 27.3, "rr": 2.4},
+                                     "cautions": ["earnings in 6d"]}},
+        {"ticker": "ATAI", "setup": {"grade": "B", "setup": "Coiled spring",
+                                     "plan": {"entry": 3.1, "stop": 2.9, "target": 3.6, "rr": 2.5},
+                                     "cautions": []}},
+        {"ticker": "RXRX", "setup": {"grade": "WATCH", "setup": "Accumulation base", "score": 50}},
+        {"ticker": "BAD", "setup": {"grade": "AVOID"}},
+    ]
+    body = alerts.format_preopen_brief(ranked, "RISK-ON",
+                                       open_trades=[{"ticker": "SOFI", "mfe_r": 0.4}],
+                                       day="Jul 03")
+    assert "PRE-OPEN BRIEF" in body and "RISK-ON" in body
+    assert "$GKOS" in body and "buy 25.1" in body and "2.4R" in body
+    assert "⚠ earnings in 6d" in body
+    assert "$RXRX" in body            # watch line
+    assert "$BAD" not in body         # AVOID never makes the brief
+    assert "$SOFI +0.4R" in body      # ledger book
+    assert len(body) < 1024           # Pushover message cap
+    # nothing actionable → None (caller sends the honest "nothing today" note)
+    assert alerts.format_preopen_brief([{"ticker": "X", "setup": {"grade": "AVOID"}}], "NEUTRAL") is None
+
+
 def test_alerts_not_configured_when_no_channel(monkeypatch):
     monkeypatch.setattr(alerts, "PUSHOVER_TOKEN", "")
     monkeypatch.setattr(alerts, "PUSHOVER_USER", "")

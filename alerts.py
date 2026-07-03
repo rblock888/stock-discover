@@ -211,6 +211,67 @@ def alert_coiled(stock: dict, kind: str, bypass: bool = False) -> bool:
     return False
 
 
+def format_preopen_brief(ranked: list, regime_label: str = None,
+                         open_trades: list = None, day: str = None) -> str | None:
+    """The best-of list before the New York open — compact enough for a phone.
+
+    Top actionable setups (A/B with plans), then the strongest WATCH names
+    (forming, pre-trigger), event-risk flags, and the paper-ledger book.
+    Returns None when there's genuinely nothing worth waking up for."""
+    graded = [s for s in ranked if (s.get("setup") or {}).get("grade") in ("A", "B")]
+    watches = [s for s in ranked if (s.get("setup") or {}).get("grade") == "WATCH"]
+    if not graded and not watches:
+        return None
+
+    lines = [f"🔔 *PRE-OPEN BRIEF*{' — ' + day if day else ''}", ""]
+    if regime_label:
+        lines.append(f"🌡 {regime_label} · {len(graded)} actionable · {len(watches)} forming")
+        lines.append("")
+
+    for s in graded[:5]:
+        v = s["setup"]
+        pl = v.get("plan") or {}
+        lines.append(f"[{v['grade']}] ${s['ticker']} — {v.get('setup', '')}")
+        if pl.get("entry"):
+            lines.append(f"   buy {pl['entry']} · stop {pl['stop']} · tgt {pl['target']} ({pl.get('rr', '?')}R)")
+        cau = next((c for c in (v.get("cautions") or []) if "earnings" in c or "dilution" in c), None)
+        if cau:
+            lines.append(f"   ⚠ {cau[:70]}")
+    if watches:
+        top_watch = sorted(watches, key=lambda s: -(s["setup"].get("score") or 0))[:3]
+        lines.append("👁 watch: " + " · ".join(f"${s['ticker']}" for s in top_watch))
+    if open_trades:
+        pos = ", ".join(f"${t['ticker']} {t.get('mfe_r') or 0:+.1f}R peak" for t in open_trades[:3])
+        lines.append(f"📒 open: {pos}")
+    return "\n".join(lines)
+
+
+def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True) -> bool:
+    """Send the daily pre-open digest (once per day — dedupe via a pseudo-ticker)."""
+    if not is_configured() or not ranked:
+        return False
+    if log and db.alert_already_sent("_DAILY", "preopen_brief", within_hours=12):
+        return False
+    open_trades = []
+    try:
+        open_trades = db.get_paper_trades(status="open")
+    except Exception:
+        pass
+    from datetime import datetime as _dt
+    body = format_preopen_brief(ranked, regime_label, open_trades,
+                                day=_dt.now().strftime("%b %d"))
+    if body is None:
+        # nothing actionable — still tell us once, silence is ambiguous
+        body = (f"🔔 *PRE-OPEN BRIEF — {_dt.now().strftime('%b %d')}*\n\n"
+                f"No actionable A/B setups this morning ({regime_label or 'regime n/a'}). "
+                "The engine found nothing worth chasing — that's a position too.")
+    if _send(body):
+        if log:
+            db.log_alert("_DAILY", "preopen_brief", {"n_ranked": len(ranked)})
+        return True
+    return False
+
+
 def alert_intraday_breakout(fired: dict) -> bool:
     """5-minute watcher trigger: a completed intraday bar closed through the
     pivot on real volume. Payload is fully instrumented so its own scorecard

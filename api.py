@@ -63,6 +63,7 @@ import setup_backtest
 import paper_ledger
 import news_cache
 import intraday_watch
+import volume_delta
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -622,6 +623,11 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     # Pre-breakout / coiled-spring detector — catch them BEFORE they fly
     try:
         result["coiled"] = pre_breakout.compute(ticker, hist)
+        # volume-delta proxies (the book's delta read, daily-bar edition)
+        try:
+            result["vol_delta"] = volume_delta.compute(hist)
+        except Exception:
+            result["vol_delta"] = dict(volume_delta.UNAVAILABLE)
         # fresh-dilution flag for conviction's event gate (TTL-cached news — the
         # same fetch news_sentiment/catalysts already made this cycle)
         try:

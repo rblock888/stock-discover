@@ -708,6 +708,78 @@ def test_conviction_imminent_earnings_forces_watch():
     assert any("enter after the print" in c for c in v["cautions"])
 
 
+# ── volume delta proxies: CMF, up/down volume, flow divergence ───────────────
+
+import volume_delta
+
+
+def _vd_frame(c, h=None, l=None, v=None):
+    c = np.asarray(c, dtype=float)
+    h = np.asarray(h, dtype=float) if h is not None else c * 1.01
+    l = np.asarray(l, dtype=float) if l is not None else c * 0.99
+    v = np.asarray(v, dtype=float) if v is not None else np.full(len(c), 1e6)
+    idx = pd.date_range("2025-01-01", periods=len(c), freq="B")
+    return pd.DataFrame({"Close": c, "High": h, "Low": l, "Open": c, "Volume": v}, index=idx)
+
+
+def test_volume_delta_accumulation_state():
+    """Closes pinned at bar highs on rising up-day volume = flow-confirmed
+    accumulation (the daily-bar positive-delta signature)."""
+    n = 60
+    c = np.linspace(10, 11.5, n) + np.tile([0.0, -0.03], n // 2)  # up-drift, tiny dips
+    h = c + 0.01          # close basically AT the high → CLV ≈ +1
+    l = c - 0.30
+    v = np.where(np.concatenate(([1], np.diff(c))) > 0, 2e6, 8e5)  # up days 2.5x volume
+    out = volume_delta.compute(_vd_frame(c, h, l, v))
+    assert out["available"] and out["state"] == "ACCUMULATION"
+    assert out["cmf20"] > 0.5 and out["updown_ratio"] > 1.3
+
+
+def test_volume_delta_bearish_divergence_at_highs():
+    """Price pushes to a marginal higher high while signed volume flow fades —
+    the book's delta divergence / effort-without-result-at-the-highs."""
+    up = np.linspace(10, 14, 30)          # strong leg on close-at-high bars
+    grind = np.linspace(14, 14.4, 15)     # marginal new highs...
+    c = np.concatenate([up, grind])
+    h = np.concatenate([up + 0.02, grind + 0.40])   # ...with closes near bar LOWS
+    l = np.concatenate([up - 0.40, grind - 0.02])
+    v = np.concatenate([np.full(30, 2e6), np.full(15, 2.5e6)])  # heavy volume, no result
+    out = volume_delta.compute(_vd_frame(c, h, l, v))
+    assert out["available"]
+    assert out["divergence"] == "bearish"
+
+
+def test_session_pseudo_delta_sign():
+    closes = np.array([10.0, 10.1, 10.2])
+    idx = pd.date_range("2026-07-02 09:30", periods=3, freq="5min")
+    bullish = pd.DataFrame({"Close": closes, "High": closes, "Low": closes - 0.2,
+                            "Open": closes - 0.1, "Volume": [1e5] * 3}, index=idx)
+    bearish = pd.DataFrame({"Close": closes, "High": closes + 0.2, "Low": closes,
+                            "Open": closes + 0.1, "Volume": [1e5] * 3}, index=idx)
+    assert volume_delta.session_pseudo_delta(bullish) > 0    # closes at highs
+    assert volume_delta.session_pseudo_delta(bearish) < 0    # closes at lows
+    assert volume_delta.session_pseudo_delta(None) is None
+
+
+def test_conviction_bearish_flow_divergence_demotes_a():
+    stock = {
+        "composite": 64, "calibrated_p_win": 0.42, "quote": {"market_cap": 6e8},
+        "breakdown": {"fundamentals": {"raw": 82}, "insider": {"raw": 70}, "catalyst": {"raw": 75}},
+        "tilt": {"factor": 1.12},
+        "vol_delta": {"available": True, "state": "NEUTRAL", "cmf20": -0.02,
+                      "updown_ratio": 1.0, "divergence": "bearish"},
+        "smad": {"available": True, "state": "DEMAND RETEST", "smad_score": 78, "demand_zone": [4.0, 4.3]},
+        "coiled": {"state": "BASING"},
+        "edge": {"above_20ma": True, "flow": {"state": "HEALTHY"}, "bearing": {"state": "CLEAN UP"}},
+        "book": {"available": True, "phase": {"state": "ACCUMULATION"}, "rbs": {}, "reversal": {},
+                 "profile": {"position": "inside"},
+                 "plan": {"entry": 4.2, "stop": 3.9, "target": 4.9, "rr": 2.3, "risk_pct": 7.1}},
+    }
+    v = conviction.assess(stock, _RISK_ON)
+    assert v["grade"] != "A"
+    assert any("flow divergence" in c for c in v["cautions"])
+
+
 # ── intraday watcher: trigger rules ──────────────────────────────────────────
 
 import intraday_watch
@@ -716,8 +788,10 @@ from zoneinfo import ZoneInfo as _ZI
 
 def _fake_5m(closes, vols):
     idx = pd.date_range("2026-07-02 09:30", periods=len(closes), freq="5min")
-    return pd.DataFrame({"Close": closes, "Volume": vols,
-                         "Open": closes, "High": closes, "Low": closes}, index=idx)
+    closes = np.array(closes, dtype=float)
+    # bars close at their highs → CLV +1 → positive session pseudo-delta
+    return pd.DataFrame({"Close": closes, "Volume": vols, "Open": closes * 0.995,
+                         "High": closes, "Low": closes * 0.99}, index=idx)
 
 
 def test_intraday_trigger_needs_completed_close_and_rvol(monkeypatch):

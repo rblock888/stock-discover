@@ -56,6 +56,7 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
     comp = stock.get("competitors") or {}
     mood = (regime.get("mood") or {}).get("label") if regime and regime.get("available") else None
 
+    vd = stock.get("vol_delta") or {}
     cstate = coiled.get("state")
     sstate = smad.get("state")
     zone = smad.get("demand_zone")
@@ -122,6 +123,11 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
             "20>50>200" if ema.get("stack_bullish") else ("reclaimed 50EMA" if ema.get("reclaim") else "")),
         fac("Trend up (not down)", "technical", above20 and bearing not in ("DOWN", "CHOPPY DOWN"), bearing or ""),
         fac("Volume confirms", "technical", flow in ("HEALTHY", "CROWDED") or cstate == "BREAKING", flow or ""),
+        # daily-bar delta proxy (close-in-range × volume): is signed flow behind it?
+        fac("Flow accumulation (Δ proxy)", "technical",
+            vd.get("state") == "ACCUMULATION" or (vd.get("cmf20") or 0) >= 0.05
+            or vd.get("divergence") == "bullish",
+            vd.get("summary", "") if vd.get("available") else ""),
         # FUNDAMENTAL
         fac("Strong fundamentals", "fundamental", fund >= 60, f"{fund:.0f}/100"),
         fac("Catalyst", "fundamental", cat >= 60, f"{cat:.0f}/100"),
@@ -276,6 +282,16 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         elif _f(stat.get("expectancy_lb"), -9) >= 0.05:
             cautions.append(f"strong measured edge ({ar:+.2f}R, lb {_f(stat.get('expectancy_lb')):+.2f}, "
                             f"{stat.get('win_rate')}% win)")
+    # ── Delta-divergence warning (the book's strongest single tell): price at
+    # higher highs while signed volume flow makes LOWER highs = buyers printing
+    # candles while being absorbed. Bounded: caution + A→B only; the components
+    # persist per snapshot so this earns a harder gate only if its IC shows up ──
+    if vd.get("divergence") == "bearish":
+        cautions.append("bearish flow divergence — price up on fading signed volume "
+                        "(effort without result at the highs)")
+        if grade == "A":
+            grade = "B"
+
     # demotion cap with hysteresis (state computed in setup_backtest: n>=50 and
     # shrunk tradeable expectancy < 0.03; released only above 0.07)
     if stat and stat.get("capped"):

@@ -663,7 +663,8 @@ def evidence_weights(horizon: int = 5) -> dict:
 
 CAT_COMPONENTS = ["cat_earnings_days", "cat_target_upside", "cat_rec_score",
                   "cat_n_analysts", "attention", "catalyst_event",
-                  "prefly_component", "attention_component"]
+                  "prefly_component", "attention_component",
+                  "vd_cmf", "vd_updown", "vd_diverge"]
 MIN_N_CAT_COMPONENT = 250
 
 

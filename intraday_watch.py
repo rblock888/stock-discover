@@ -147,6 +147,13 @@ def check_triggers(bars_by_ticker: dict = None, now=None) -> list:
         rvol = cum_vol / prorated if prorated > 0 else 0.0
         if rvol < RVOL_MIN:
             continue
+        # session pseudo-delta (Σ CLV×vol over completed bars): a breakout bar
+        # printing while session flow is net-NEGATIVE is the book's delta-trap
+        # shape — buyers being absorbed at the highs. Require positive flow.
+        import volume_delta
+        pdelta = volume_delta.session_pseudo_delta(done)
+        if pdelta is not None and pdelta <= 0:
+            continue
         if db.alert_already_sent(t, "breakout", within_hours=48):
             continue
         if db.alert_already_sent(t, "intraday_breakout", within_hours=48):
@@ -154,5 +161,6 @@ def check_triggers(bars_by_ticker: dict = None, now=None) -> list:
         fired.append({"ticker": t, "price": round(last_close, 4),
                       "pivot_price": h["pivot_price"],
                       "rvol_prorated": round(rvol, 2),
+                      "pseudo_delta": round(pdelta, 0) if pdelta is not None else None,
                       "coiled_score": h["coiled_score"]})
     return fired

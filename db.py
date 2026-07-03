@@ -189,6 +189,14 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 sent_comp = (bd.get("sentiment") or {}).get("components") or {}
                 bs["attention"] = sent_comp.get("attention")
                 bs["sentiment_ver"] = sent_comp.get("ver")
+                # volume-delta proxies (the book's delta read on daily bars) —
+                # persisted so their ICs are measured before any harder gate
+                vd = stock.get("vol_delta") or {}
+                bs["vd_cmf"] = vd.get("cmf20")
+                bs["vd_updown"] = vd.get("updown_ratio")
+                bs["vd_diverge"] = {"bearish": -1, "bullish": 1}.get(vd.get("divergence"), 0) \
+                    if vd.get("available") else None
+                bs["vd_state"] = vd.get("state") if vd.get("available") else None
                 # discovery provenance — which source/feed surfaced this name, and
                 # what the pre-fly rerank saw (per-component IC measurement later)
                 disc = stock.get("discovery") or {}

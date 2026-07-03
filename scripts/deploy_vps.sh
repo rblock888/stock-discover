@@ -22,7 +22,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/rblock888/stock-discover.git"
 BRANCH="feat/regime-dashboard"
-APP_DIR=""
+APP_DIR=""   # discovered below; the real box: /opt/stock-discover (Vultr, 2GB, venv)
 
 log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 
@@ -42,9 +42,19 @@ fi
 sysctl -w vm.swappiness=10 >/dev/null
 grep -q 'vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
 
+# ── 1b. DNS guard: Tailscale MagicDNS hijacked resolv.conf on this box after a
+# reboot while its resolver was dead — no github/yfinance until fixed ─────────
+if ! getent hosts github.com >/dev/null 2>&1; then
+  echo "DNS broken — disabling Tailscale DNS override"
+  tailscale set --accept-dns=false 2>/dev/null || true
+  [ -f /run/systemd/resolve/stub-resolv.conf ] && ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  sleep 2
+  getent hosts github.com >/dev/null || { echo "DNS still broken — fix manually"; exit 1; }
+fi
+
 # ── 2. find or fetch the code ─────────────────────────────────────────────────
 log "locate repo"
-for d in /root/stock-discover /root/Stocks /opt/stock-discover /home/*/stock-discover; do
+for d in /opt/stock-discover /root/stock-discover /root/Stocks /home/*/stock-discover; do
   if [ -d "$d/.git" ]; then APP_DIR="$d"; break; fi
 done
 if [ -z "$APP_DIR" ]; then
@@ -61,6 +71,7 @@ echo "at commit: $(git rev-parse --short HEAD)"
 # ── 3. python deps ────────────────────────────────────────────────────────────
 log "python deps"
 PY=python3
+[ -x "$APP_DIR/venv/bin/python" ] && PY="$APP_DIR/venv/bin/python"   # the box uses a venv
 $PY -m pip install --quiet --upgrade pip
 $PY -m pip install --quiet -r requirements.txt
 $PY -m textblob.download_corpora >/dev/null 2>&1 || true
@@ -84,12 +95,14 @@ fi
 log "frontend build"
 cd "$APP_DIR/frontend"
 npm ci --no-audit --no-fund
-npm run build
+NODE_OPTIONS=--max-old-space-size=1536 npm run build   # 2GB box: bound the heap
 
 # ── 6. systemd units ──────────────────────────────────────────────────────────
 log "systemd units"
 API_UNIT=/etc/systemd/system/stock-api.service
 WEB_UNIT=/etc/systemd/system/stock-web.service
+# the real box already has stock-frontend.service — use it if present
+[ -f /etc/systemd/system/stock-frontend.service ] && WEB_UNIT=/etc/systemd/system/stock-frontend.service
 
 if [ ! -f "$API_UNIT" ]; then
   cat > "$API_UNIT" <<EOF
@@ -135,7 +148,8 @@ fi
 # restart-loop throttle for BOTH units (drop-in overrides — never touches the
 # main unit files, so existing Environment= lines survive): a crashing service
 # gets 5 tries per 5 minutes with 10s pauses, instead of pegging the CPU forever
-for svc in stock-api stock-web; do
+WEB_SVC=$(basename "$WEB_UNIT" .service)
+for svc in stock-api "$WEB_SVC"; do
   mkdir -p "/etc/systemd/system/${svc}.service.d"
   cat > "/etc/systemd/system/${svc}.service.d/throttle.conf" <<'EOF'
 [Unit]
@@ -149,10 +163,10 @@ EOF
 done
 
 systemctl daemon-reload
-systemctl enable stock-api stock-web >/dev/null 2>&1 || true
+systemctl enable stock-api "$WEB_SVC" >/dev/null 2>&1 || true
 systemctl restart stock-api
 sleep 3
-systemctl restart stock-web
+systemctl restart "$WEB_SVC"
 
 # ── 7. verify ─────────────────────────────────────────────────────────────────
 log "verify"

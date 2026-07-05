@@ -1078,6 +1078,18 @@ def test_econ_calendar_upcoming_and_today():
     assert econ_calendar.today_events(today=date(2026, 7, 15)) == []
 
 
+def test_preopen_brief_flags_premarket_gaps():
+    ranked = [{"ticker": "GKOS", "setup": {"grade": "A", "setup": "Breakout",
+                                           "plan": {"entry": 148.3, "stop": 133.2, "target": 178.6, "rr": 2.0},
+                                           "cautions": []}}]
+    body = alerts.format_preopen_brief(ranked, "RISK-ON", day="Jul 06",
+                                       gaps={"GKOS": 12.4})
+    assert "gapping +12.4% pre-market" in body and "plan is stale" in body
+    # no gap dict -> no annotation, no crash
+    body2 = alerts.format_preopen_brief(ranked, "RISK-ON", day="Jul 06")
+    assert "gapping" not in body2
+
+
 def test_preopen_brief_includes_macro_and_events():
     ranked = [{"ticker": "GKOS", "setup": {"grade": "A", "setup": "Breakout",
                                            "plan": {"entry": 148.3, "stop": 133.2, "target": 178.6, "rr": 2.0},

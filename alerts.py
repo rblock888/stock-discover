@@ -211,9 +211,35 @@ def alert_coiled(stock: dict, kind: str, bypass: bool = False) -> bool:
     return False
 
 
+def _premarket_gaps(tickers: list, threshold_pct: float = 3.0) -> dict:
+    """{ticker: gap_pct} for names moving >=3% in PRE-MARKET vs previous close.
+
+    yfinance serves preMarketPrice free during 04:00-09:30 ET — exactly the
+    window the 08:45 brief runs in. A plan priced off yesterday's close is
+    STALE on a gapping name; flag it rather than let the entry mislead.
+    Fail-open: outside pre-market (or on fetch failure) returns {}."""
+    gaps = {}
+    try:
+        import yfinance as yf
+        for t in tickers[:10]:
+            try:
+                info = yf.Ticker(t).info or {}
+                pre, prev = info.get("preMarketPrice"), info.get("previousClose")
+                if pre and prev:
+                    gap = (float(pre) / float(prev) - 1) * 100
+                    if abs(gap) >= threshold_pct:
+                        gaps[t] = round(gap, 1)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return gaps
+
+
 def format_preopen_brief(ranked: list, regime_label: str = None,
                          open_trades: list = None, day: str = None,
-                         macro_line: str = None, events: list = None) -> str | None:
+                         macro_line: str = None, events: list = None,
+                         gaps: dict = None) -> str | None:
     """The best-of list before the New York open — compact enough for a phone.
 
     Top actionable setups (A/B with plans), then the strongest WATCH names
@@ -236,12 +262,16 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
     if regime_label or macro_line or events:
         lines.append("")
 
+    gaps = gaps or {}
     for s in graded[:5]:
         v = s["setup"]
         pl = v.get("plan") or {}
         lines.append(f"[{v['grade']}] ${s['ticker']} — {v.get('setup', '')}")
         if pl.get("entry"):
             lines.append(f"   buy {pl['entry']} · stop {pl['stop']} · tgt {pl['target']} ({pl.get('rr', '?')}R)")
+        if s["ticker"] in gaps:
+            g = gaps[s["ticker"]]
+            lines.append(f"   ⚡ gapping {g:+.1f}% pre-market — plan is stale, re-plan at open")
         cau = next((c for c in (v.get("cautions") or []) if "earnings" in c or "dilution" in c), None)
         if cau:
             lines.append(f"   ⚠ {cau[:70]}")
@@ -273,9 +303,12 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
         events = econ_calendar.upcoming(days=1)
     except Exception:
         pass
+    graded_tickers = [s["ticker"] for s in ranked
+                      if (s.get("setup") or {}).get("grade") in ("A", "B")]
+    gaps = _premarket_gaps(graded_tickers + [t["ticker"] for t in open_trades])
     body = format_preopen_brief(ranked, regime_label, open_trades,
                                 day=_dt.now().strftime("%b %d"),
-                                macro_line=macro_line, events=events)
+                                macro_line=macro_line, events=events, gaps=gaps)
     if body is None:
         # nothing actionable — still tell us once, silence is ambiguous
         body = (f"🔔 *PRE-OPEN BRIEF — {_dt.now().strftime('%b %d')}*\n\n"

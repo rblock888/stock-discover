@@ -1064,6 +1064,32 @@ def test_alerts_dispatch_to_pushover(monkeypatch):
     assert calls["data"]["html"] == 1
 
 
+def test_econ_calendar_upcoming_and_today():
+    import econ_calendar
+    from datetime import date
+    # 2026-07-14 is a CPI day (verified vs BLS); 2026-07-29 an FOMC decision
+    ev = econ_calendar.upcoming(days=30, today=date(2026, 7, 3))
+    names = {(e["date"], e["name"]) for e in ev}
+    assert ("2026-07-14", "CPI") in names
+    assert ("2026-07-29", "FOMC decision") in names
+    assert ("2026-07-03", "Jobs report (NFP)") in names   # first Friday of July
+    today = econ_calendar.today_events(today=date(2026, 7, 14))
+    assert any(e["name"] == "CPI" and e["days_away"] == 0 for e in today)
+    assert econ_calendar.today_events(today=date(2026, 7, 15)) == []
+
+
+def test_preopen_brief_includes_macro_and_events():
+    ranked = [{"ticker": "GKOS", "setup": {"grade": "A", "setup": "Breakout",
+                                           "plan": {"entry": 148.3, "stop": 133.2, "target": 178.6, "rr": 2.0},
+                                           "cautions": []}}]
+    body = alerts.format_preopen_brief(
+        ranked, "RISK-ON", day="Jul 14",
+        macro_line="ES▲ NQ▲ Gold▼ Oil· EUR· GBP· JPY▼ BTC▲",
+        events=[{"date": "2026-07-14", "name": "CPI", "time_et": "08:30", "days_away": 0}])
+    assert "🌍 ES▲" in body
+    assert "CPI today 08:30 ET" in body and "size down" in body
+
+
 def test_preopen_brief_formatting():
     ranked = [
         {"ticker": "GKOS", "setup": {"grade": "A", "setup": "Spring reclaim",

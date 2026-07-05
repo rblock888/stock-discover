@@ -849,6 +849,31 @@ export function Overview({ data, onNavigate }: {
       {/* THE answer — what's actually a good pick right now */}
       <TopSetups ranked={ranked} stats={data?.setup_stats} />
 
+      {/* Macro bias strip + high-impact event countdown (free-data version of
+          the paid "directional bias engine" + economic calendar) */}
+      {(regime?.macro_bias?.length || regime?.econ_events?.length) ? (
+        <div className="glass rounded-2xl px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          {(regime?.macro_bias ?? []).map((b) => {
+            const col = b.bias === "BULLISH" ? "var(--green)" : b.bias === "BEARISH" ? "var(--red)" : "var(--text-muted)";
+            const glyph = b.bias === "BULLISH" ? "▲" : b.bias === "BEARISH" ? "▼" : "·";
+            return (
+              <span key={b.symbol} className="text-[11px] whitespace-nowrap cursor-help"
+                title={`${b.name}: ${b.bias} ${b.score}/100 · ${b.chg_1d_pct >= 0 ? "+" : ""}${b.chg_1d_pct}% today${b.cmf != null ? ` · flow ${b.cmf >= 0 ? "+" : ""}${b.cmf}` : ""}`}>
+                <span style={{ color: "var(--text-secondary)" }}>{b.name}</span>{" "}
+                <span className="font-bold" style={{ color: col }}>{glyph}</span>
+              </span>
+            );
+          })}
+          {(regime?.econ_events ?? []).slice(0, 2).map((e) => (
+            <span key={e.date + e.name} className="text-[11px] font-semibold px-2 py-[2px] rounded-md whitespace-nowrap"
+              style={{ backgroundColor: e.days_away === 0 ? "var(--red-dim)" : "var(--amber-dim)",
+                       color: e.days_away === 0 ? "var(--red)" : "var(--amber)" }}>
+              📅 {e.name} {e.days_away === 0 ? `today ${e.time_et} ET` : e.days_away === 1 ? "tomorrow" : `in ${e.days_away}d`}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       {/* Regime band */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <MoodCard regime={regime} />

@@ -592,6 +592,8 @@ export interface MarketRegimeResponse {
   strip?: RegimeStripDay[];
   macro_desk?: MacroDesk;
   capital_flow?: CapitalFlow;
+  macro_bias?: MacroBias[];
+  econ_events?: EconEvent[];
 }
 
 export async function getMarketRegime(): Promise<MarketRegimeResponse> {
@@ -776,4 +778,23 @@ export interface ScorecardResponse {
 
 export async function getScorecard(): Promise<ScorecardResponse> {
   return fetcher("/api/scorecard");
+}
+
+export interface MacroBias {
+  symbol: string;
+  name: string;
+  bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+  score: number;
+  price: number;
+  chg_1d_pct: number;
+  cmf: number | null;
+  above_20ma: boolean;
+  above_50ma: boolean;
+}
+
+export interface EconEvent {
+  date: string;
+  name: string;
+  time_et: string;
+  days_away: number;
 }

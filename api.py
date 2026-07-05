@@ -64,6 +64,8 @@ import paper_ledger
 import news_cache
 import intraday_watch
 import volume_delta
+import macro_bias
+import econ_calendar
 import market_regime
 import brief as brief_composer
 import evaluation
@@ -366,12 +368,16 @@ def _run_axt_pipeline(tickers: list[str] | None = None):
 
 
 def _run_regime_pipeline():
-    """Refresh the market regime (and recompose the brief on top of it)."""
+    """Refresh the market regime + macro bias (and recompose the brief)."""
     breadth = cache.get("breadth") or {}
     market_regime.refresh(
         breadth_universe_pct=breadth.get("pct_above_20ma"),
         universe_n=breadth.get("n"),
     )
+    try:
+        macro_bias.refresh()
+    except Exception as e:
+        logger.error(f"macro bias refresh failed: {e}")
     _recompose_brief()
 
 
@@ -1190,8 +1196,12 @@ async def photonics_score_single(ticker: str):
 
 @app.get("/api/market-regime")
 async def get_market_regime():
-    """Cached market-regime payload (mood, indices, volatility, sectors, narrative)."""
-    return _clean(market_regime.get_cached())
+    """Cached market-regime payload (mood, indices, volatility, sectors, narrative)
+    + per-market macro bias + upcoming high-impact economic events."""
+    payload = dict(market_regime.get_cached())
+    payload["macro_bias"] = macro_bias.get_cached()
+    payload["econ_events"] = econ_calendar.upcoming(days=7)
+    return _clean(payload)
 
 
 @app.post("/api/market-regime/refresh")

@@ -212,7 +212,8 @@ def alert_coiled(stock: dict, kind: str, bypass: bool = False) -> bool:
 
 
 def format_preopen_brief(ranked: list, regime_label: str = None,
-                         open_trades: list = None, day: str = None) -> str | None:
+                         open_trades: list = None, day: str = None,
+                         macro_line: str = None, events: list = None) -> str | None:
     """The best-of list before the New York open — compact enough for a phone.
 
     Top actionable setups (A/B with plans), then the strongest WATCH names
@@ -226,6 +227,13 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
     lines = [f"🔔 *PRE-OPEN BRIEF*{' — ' + day if day else ''}", ""]
     if regime_label:
         lines.append(f"🌡 {regime_label} · {len(graded)} actionable · {len(watches)} forming")
+    if macro_line:
+        lines.append(f"🌍 {macro_line}")
+    # high-impact events TODAY — the books' rule: don't trade the news
+    for e in (events or []):
+        if e.get("days_away") == 0:
+            lines.append(f"📅 *{e['name']} today {e['time_et']} ET* — expect chop, size down")
+    if regime_label or macro_line or events:
         lines.append("")
 
     for s in graded[:5]:
@@ -258,8 +266,16 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
     except Exception:
         pass
     from datetime import datetime as _dt
+    macro_line = events = None
+    try:
+        import macro_bias, econ_calendar
+        macro_line = macro_bias.brief_line()
+        events = econ_calendar.upcoming(days=1)
+    except Exception:
+        pass
     body = format_preopen_brief(ranked, regime_label, open_trades,
-                                day=_dt.now().strftime("%b %d"))
+                                day=_dt.now().strftime("%b %d"),
+                                macro_line=macro_line, events=events)
     if body is None:
         # nothing actionable — still tell us once, silence is ambiguous
         body = (f"🔔 *PRE-OPEN BRIEF — {_dt.now().strftime('%b %d')}*\n\n"

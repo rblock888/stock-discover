@@ -66,14 +66,22 @@ def score_one(stock: dict) -> dict | None:
     reasons = [f"{atr_pct:.1f}%/day range"]
     trigger_px = None
 
-    if coiled.get("state") in ("COILED", "BREAKING") or _f(coiled.get("pivot_prox")) >= 0.9:
-        score += 15
-        pivot = coiled.get("pivot_price")
-        if pivot and px < _f(pivot):
-            trigger_px = _f(pivot)
-            reasons.append(f"coiled, pivot {trigger_px}")
+    coiled_state = coiled.get("state") in ("COILED", "BREAKING") or _f(coiled.get("pivot_prox")) >= 0.9
+    pivot = _f(coiled.get("pivot_price")) if coiled.get("pivot_price") else None
+    if coiled_state and pivot and px < pivot:
+        dist = pivot / px - 1
+        if dist <= 0.04:
+            score += 15                      # trigger genuinely adjacent — a day-trade level
+            trigger_px = pivot
+            reasons.append(f"pivot {pivot} just {dist*100:.0f}% up")
+        elif dist <= 0.08:
+            score += 8
+            reasons.append(f"coiled (pivot {pivot}, {dist*100:.0f}% up)")
         else:
-            reasons.append("coiled at pivot")
+            reasons.append("basing")         # swing structure — not a day trigger, no points
+    elif coiled_state:
+        score += 12
+        reasons.append("coiled at highs")
     if cat >= 60:
         score += 10
         reasons.append(f"catalyst {cat:.0f}")
@@ -91,7 +99,7 @@ def score_one(stock: dict) -> dict | None:
         reasons.append("flow+")
 
     return {
-        "ticker": stock.get("ticker"), "score": round(min(100.0, score)),
+        "ticker": stock.get("ticker"), "score": round(score),   # uncapped rank score
         "atr_pct": round(atr_pct, 1), "prev_close": px,
         "trigger_px": trigger_px, "reasons": reasons[:4],
         "grade": v.get("grade"),

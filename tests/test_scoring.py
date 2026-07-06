@@ -1085,15 +1085,20 @@ def test_day_movers_capability_and_exclusions():
         "quote": {"price": 8.0, "avg_volume": 2_000_000},
         "setup": {"grade": "WATCH"},
         "edge": {"pulse": {"atr_pct": 7.0}},
-        "coiled": {"state": "COILED", "pivot_prox": 0.95, "pivot_price": 8.4},
+        "coiled": {"state": "COILED", "pivot_prox": 0.95, "pivot_price": 8.2},
         "breakdown": {"catalyst": {"raw": 70, "metrics": {"earnings_days": None, "event": 90}}},
         "short_squeeze": {"score": 65},
         "vol_delta": {"available": True, "state": "ACCUMULATION"},
     }
     m = day_movers.score_one(base)
     assert m is not None and m["score"] >= 90          # capability + every trigger
-    assert m["trigger_px"] == 8.4
-    assert any("coiled" in r for r in m["reasons"])
+    assert m["trigger_px"] == 8.2                      # pivot 2.5% up = a real day trigger
+    assert any("pivot" in r for r in m["reasons"])
+    # a pivot 9% away is a SWING level, not a day trigger — no watch line, no points
+    far = {**base, "coiled": {"state": "COILED", "pivot_prox": 0.95, "pivot_price": 8.7}}
+    mf = day_movers.score_one(far)
+    assert mf["trigger_px"] is None
+    assert mf["score"] < m["score"]                    # scores now discriminate
     # a 1.5%-a-day large cap can't print 5-10% — capability floor keeps it out
     calm = {**base, "edge": {"pulse": {"atr_pct": 1.5}},
             "coiled": {}, "breakdown": {"catalyst": {"raw": 30, "metrics": {}}},

@@ -659,6 +659,29 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     except Exception:
         result["quote"] = None
 
+    # Quote fallback from the price history we ALWAYS have in hand: Yahoo
+    # rate-limits .info on the VPS ("Invalid Crumb" 401s) and a None quote
+    # silently poisons everything downstream — grades without prices, plans
+    # that read absurd, the movers list starving to zero. Daily closes are
+    # already fetched for every scored ticker; use them.
+    q = result.get("quote") or {}
+    if not q.get("price") and hist is not None and len(hist) >= 2:
+        try:
+            closes = hist["Close"]
+            px = float(closes.iloc[-1])
+            prev = float(closes.iloc[-2])
+            result["quote"] = {
+                **q,
+                "price": round(px, 4),
+                "change_pct": round((px / prev - 1) * 100, 2) if prev else 0.0,
+                "avg_volume": float(hist["Volume"].tail(20).mean()),
+                "market_cap": q.get("market_cap") or 0,
+                "name": q.get("name") or ticker,
+                "src": "hist_fallback",
+            }
+        except Exception:
+            pass
+
     # Add early detection / potential score
     early = early_detection.score(ticker, bucket_scores)
     result["early_detection"] = early

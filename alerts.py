@@ -341,6 +341,7 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
                 "n_ranked": len(ranked),
                 "movers": [{"ticker": m["ticker"], "prev_close": m["prev_close"],
                             "score": m["score"]} for m in movers],
+                "body": body[:1500],   # the EXACT text sent — auditable line-by-line
             })
         return True
     return False

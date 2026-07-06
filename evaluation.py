@@ -964,6 +964,49 @@ def intraday_scorecard() -> dict:
     return out
 
 
+def day_movers_scorecard() -> dict:
+    """Did the pre-open MOVERS WATCH names actually touch +5% / +10% that day?
+
+    Reads every published movers list (logged with previous closes in the
+    preopen_brief payload) and checks the SAME DAY's high against prev close.
+    The list is a forecast — this is its box score. Accrues from first
+    publication; descriptive below ~25 published names."""
+    briefs = db.get_alerts_by_type("preopen_brief")
+    rows = []
+    for b in briefs:
+        try:
+            payload = json.loads(b.get("payload") or "{}")
+        except Exception:
+            continue
+        day = (b.get("sent_at") or "")[:10]
+        for m in (payload.get("movers") or []):
+            t, pc = m.get("ticker"), m.get("prev_close")
+            if not t or not pc:
+                continue
+            hist = price_history.get_history(t, period="3mo")
+            if hist is None or hist.empty:
+                continue
+            try:
+                bar = hist.loc[day]
+                hi = float(bar["High"]) if hasattr(bar, "__getitem__") else None
+            except (KeyError, TypeError):
+                continue
+            if not hi:
+                continue
+            move = hi / float(pc) - 1.0
+            rows.append({"ticker": t, "day": day, "max_move_pct": round(move * 100, 1),
+                         "hit5": move >= 0.05, "hit10": move >= 0.10})
+    n = len(rows)
+    return {
+        "n": n, "descriptive_only": n < 25,
+        "hit5_rate": round(float(np.mean([r["hit5"] for r in rows])) * 100, 1) if n else None,
+        "hit10_rate": round(float(np.mean([r["hit10"] for r in rows])) * 100, 1) if n else None,
+        "avg_max_move_pct": round(float(np.mean([r["max_move_pct"] for r in rows])), 1) if n else None,
+        "recent": rows[-10:],
+        "detail": "Same-day high vs previous close for every published movers-watch name.",
+    }
+
+
 MIN_N_LEDGER = 50   # below this, the ledger is descriptive only
 
 
@@ -1054,6 +1097,7 @@ def refresh(horizons=None) -> dict:
         _cache["grade_scorecard"] = {h: grade_scorecard(h) for h in (horizons or HORIZONS)}
         _cache["catalyst_components"] = catalyst_components(5)
         _cache["intraday_scorecard"] = intraday_scorecard()
+        _cache["day_movers_scorecard"] = day_movers_scorecard()
         # cross-horizon evidence matrix — is a bucket's IC consistent across 5/10/20/60d?
         matrix = {}
         for h in (horizons or HORIZONS):
@@ -1103,4 +1147,5 @@ def get_cached() -> dict:
         "catalyst_components": _cache.get("catalyst_components") or catalyst_components(5),
         "evidence_weights_matrix": _cache.get("evidence_weights_matrix"),
         "intraday_scorecard": _cache.get("intraday_scorecard"),
+        "day_movers_scorecard": _cache.get("day_movers_scorecard"),
     }

@@ -239,7 +239,7 @@ def _premarket_gaps(tickers: list, threshold_pct: float = 3.0) -> dict:
 def format_preopen_brief(ranked: list, regime_label: str = None,
                          open_trades: list = None, day: str = None,
                          macro_line: str = None, events: list = None,
-                         gaps: dict = None) -> str | None:
+                         gaps: dict = None, movers: list = None) -> str | None:
     """The best-of list before the New York open — compact enough for a phone.
 
     Top actionable setups (A/B with plans), then the strongest WATCH names
@@ -247,7 +247,8 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
     Returns None when there's genuinely nothing worth waking up for."""
     graded = [s for s in ranked if (s.get("setup") or {}).get("grade") in ("A", "B")]
     watches = [s for s in ranked if (s.get("setup") or {}).get("grade") == "WATCH"]
-    if not graded and not watches:
+    movers = movers or []
+    if not graded and not watches and not movers:
         return None
 
     lines = [f"🔔 *PRE-OPEN BRIEF*{' — ' + day if day else ''}", ""]
@@ -263,7 +264,17 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
         lines.append("")
 
     gaps = gaps or {}
-    for s in graded[:5]:
+    if movers:
+        lines.append("🚀 *MOVERS WATCH* — 5-10% day potential")
+        for m in movers:
+            why = " · ".join(m["reasons"])
+            trig = f" · watch >{m['trigger_px']}" if m.get("trigger_px") else ""
+            gap_note = f" ⚡{gaps[m['ticker']]:+.1f}% pre-mkt" if m["ticker"] in gaps else ""
+            lines.append(f"${m['ticker']} {m['score']} — {why}{trig}{gap_note}")
+        lines.append("")
+    if graded:
+        lines.append("🎯 swing setups:")
+    for s in graded[:3]:
         v = s["setup"]
         pl = v.get("plan") or {}
         lines.append(f"[{v['grade']}] ${s['ticker']} — {v.get('setup', '')}")
@@ -303,12 +314,20 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
         events = econ_calendar.upcoming(days=1)
     except Exception:
         pass
+    movers = []
+    try:
+        import day_movers
+        movers = day_movers.build_watchlist(ranked)
+    except Exception:
+        pass
     graded_tickers = [s["ticker"] for s in ranked
                       if (s.get("setup") or {}).get("grade") in ("A", "B")]
-    gaps = _premarket_gaps(graded_tickers + [t["ticker"] for t in open_trades])
+    gaps = _premarket_gaps([m["ticker"] for m in movers] + graded_tickers
+                           + [t["ticker"] for t in open_trades])
     body = format_preopen_brief(ranked, regime_label, open_trades,
                                 day=_dt.now().strftime("%b %d"),
-                                macro_line=macro_line, events=events, gaps=gaps)
+                                macro_line=macro_line, events=events, gaps=gaps,
+                                movers=movers)
     if body is None:
         # nothing actionable — still tell us once, silence is ambiguous
         body = (f"🔔 *PRE-OPEN BRIEF — {_dt.now().strftime('%b %d')}*\n\n"
@@ -316,7 +335,13 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
                 "The engine found nothing worth chasing — that's a position too.")
     if _send(body):
         if log:
-            db.log_alert("_DAILY", "preopen_brief", {"n_ranked": len(ranked)})
+            # movers logged with previous closes so their hit rate ("did it
+            # actually touch +5% that day?") is MEASURED — day_movers_scorecard
+            db.log_alert("_DAILY", "preopen_brief", {
+                "n_ranked": len(ranked),
+                "movers": [{"ticker": m["ticker"], "prev_close": m["prev_close"],
+                            "score": m["score"]} for m in movers],
+            })
         return True
     return False
 
@@ -379,8 +404,16 @@ def send_test() -> bool:
 def process_scan_results(ranked_stocks: list, ai_picks: list = None):
     """
     Called after each scan. Sends alerts for new picks and improvements.
+
+    ALERT_MODE "focused" (default): this whole per-scan stream is SILENT — the
+    day speaks twice only: the 08:45 ET pre-open brief (movers watchlist) and
+    the intraday watcher when a watched name actually breaks. Set "all" in
+    config.py to restore the legacy firehose.
     """
     if not is_configured():
+        return
+    import config as _cfg
+    if getattr(_cfg, "ALERT_MODE", "focused") == "focused":
         return
 
     # Alert measured high-conviction setups from the top of the ranking.

@@ -1078,6 +1078,59 @@ def test_econ_calendar_upcoming_and_today():
     assert econ_calendar.today_events(today=date(2026, 7, 15)) == []
 
 
+def test_day_movers_capability_and_exclusions():
+    import day_movers
+    base = {
+        "ticker": "MOVR",
+        "quote": {"price": 8.0, "avg_volume": 2_000_000},
+        "setup": {"grade": "WATCH"},
+        "edge": {"pulse": {"atr_pct": 7.0}},
+        "coiled": {"state": "COILED", "pivot_prox": 0.95, "pivot_price": 8.4},
+        "breakdown": {"catalyst": {"raw": 70, "metrics": {"earnings_days": None, "event": 90}}},
+        "short_squeeze": {"score": 65},
+        "vol_delta": {"available": True, "state": "ACCUMULATION"},
+    }
+    m = day_movers.score_one(base)
+    assert m is not None and m["score"] >= 90          # capability + every trigger
+    assert m["trigger_px"] == 8.4
+    assert any("coiled" in r for r in m["reasons"])
+    # a 1.5%-a-day large cap can't print 5-10% — capability floor keeps it out
+    calm = {**base, "edge": {"pulse": {"atr_pct": 1.5}},
+            "coiled": {}, "breakdown": {"catalyst": {"raw": 30, "metrics": {}}},
+            "short_squeeze": {}, "vol_delta": {}}
+    assert day_movers.score_one(calm)["score"] < day_movers.MIN_SCORE
+    # vetoed names and earnings-today coin flips never make the list
+    assert day_movers.score_one({**base, "setup": {"grade": "AVOID"}}) is None
+    ed_today = {**base, "breakdown": {"catalyst": {"raw": 70, "metrics": {"earnings_days": 0}}}}
+    assert day_movers.score_one(ed_today) is None
+    # illiquid names excluded
+    thin = {**base, "quote": {"price": 8.0, "avg_volume": 10_000}}
+    assert day_movers.score_one(thin) is None
+
+
+def test_preopen_brief_leads_with_movers():
+    movers = [{"ticker": "MOVR", "score": 88, "atr_pct": 7.0, "prev_close": 8.0,
+               "trigger_px": 8.4, "reasons": ["7.0%/day range", "coiled, pivot 8.4"],
+               "grade": "WATCH"}]
+    body = alerts.format_preopen_brief([], "RISK-ON", day="Jul 07", movers=movers)
+    assert body is not None                      # movers alone justify a brief
+    assert "MOVERS WATCH" in body and "$MOVR 88" in body and "watch >8.4" in body
+
+
+def test_focused_mode_silences_scan_alerts(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ALERT_MODE", "focused", raising=False)
+    monkeypatch.setattr(alerts, "PUSHOVER_TOKEN", "t")
+    monkeypatch.setattr(alerts, "PUSHOVER_USER", "u")
+    calls = []
+    monkeypatch.setattr(alerts, "_send", lambda *a, **k: calls.append(1) or True)
+    stock = {"ticker": "X", "multi_signal_alert": True, "composite": 90,
+             "setup": {"grade": "A"}, "breakdown": {"catalyst": {"raw": 80}},
+             "coiled": {"state": "BREAKING"}, "edge": {}, "tilt": {"factor": 1.2}}
+    alerts.process_scan_results([stock], [])
+    assert calls == []                            # the firehose is off
+
+
 def test_preopen_brief_flags_premarket_gaps():
     ranked = [{"ticker": "GKOS", "setup": {"grade": "A", "setup": "Breakout",
                                            "plan": {"entry": 148.3, "stop": 133.2, "target": 178.6, "rr": 2.0},

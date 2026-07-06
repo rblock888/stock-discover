@@ -76,6 +76,13 @@ INSIDER_LOOKBACK_DAYS = 90
 TOP_N = 20  # Number of stocks to show in final ranking
 MULTI_SIGNAL_THRESHOLD = 3  # Minimum buckets scoring above 60 to trigger alert
 
+# --- Alerting ---
+# "focused" (default): ONE pre-open brief with the day-movers watchlist +
+#   intraday breakout triggers when a watched name actually goes. Nothing else.
+#   Random pings train you to ignore them — Ruben's explicit ask (2026-07-06).
+# "all": legacy firehose (high-conviction, coiled, improving, watchlist moves).
+ALERT_MODE = "focused"
+
 # --- Default universe ---
 # Start with a broad small/mid-cap list. Override with a file or custom list.
 DEFAULT_UNIVERSE_FILE = "universe.txt"  # One ticker per line

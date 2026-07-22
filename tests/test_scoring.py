@@ -1078,6 +1078,58 @@ def test_econ_calendar_upcoming_and_today():
     assert econ_calendar.today_events(today=date(2026, 7, 15)) == []
 
 
+# ── oversold: 1h RSI<30 bounce watch (day-trading timeframes) ────────────────
+
+import oversold
+
+
+def test_rsi_wilder_math():
+    # monotonic up → RSI 100; monotonic down → RSI ~0
+    assert oversold.rsi(np.arange(1, 40, dtype=float)) == pytest.approx(100.0)
+    assert oversold.rsi(np.arange(40, 1, -1, dtype=float)) == pytest.approx(0.0, abs=1e-6)
+    # not enough bars → None
+    assert oversold.rsi([1, 2, 3]) is None
+    # a heavy selloff with a tiny bounce sits deep below 30
+    c = np.concatenate([np.linspace(50, 30, 30), [30.3, 30.1]])
+    v = oversold.rsi(c)
+    assert v is not None and v < 30
+
+
+def test_oversold_scan_gates_on_1h_rsi(monkeypatch):
+    ranked = [
+        {"ticker": "OSLD", "quote": {"price": 8.0, "avg_volume": 2_000_000},
+         "setup": {"grade": "WATCH"}, "edge": {"pulse": {"atr_pct": 6.0}},
+         "coiled": {}, "breakdown": {"catalyst": {"raw": 70, "metrics": {}}},
+         "short_squeeze": {}, "vol_delta": {}},
+        {"ticker": "HOT", "quote": {"price": 8.0, "avg_volume": 2_000_000},
+         "setup": {"grade": "WATCH"}, "edge": {"pulse": {"atr_pct": 6.0}},
+         "coiled": {}, "breakdown": {"catalyst": {"raw": 70, "metrics": {}}},
+         "short_squeeze": {}, "vol_delta": {}},
+    ]
+    falling = np.concatenate([np.linspace(12, 8, 40), [8.05, 8.0]])   # deep oversold
+    rising = np.linspace(6, 8, 42)                                    # RSI ~100
+    monkeypatch.setattr(oversold, "_fetch_closes",
+                        lambda tks, period, interval:
+                        {"OSLD": falling, "HOT": rising} if interval == "60m"
+                        else {"OSLD": falling[-25:], "HOT": rising[-25:]})
+    picks = oversold.scan(ranked)
+    assert [p["ticker"] for p in picks] == ["OSLD"]    # only the 1h-oversold name
+    assert picks[0]["rsi_1h"] < 30
+    assert any("oversold" in r for r in picks[0]["reasons"])
+    assert any("15m RSI" in r for r in picks[0]["reasons"])
+
+
+def test_preopen_brief_oversold_header():
+    movers = [{"ticker": "OSLD", "score": 70, "atr_pct": 6.0, "prev_close": 8.0,
+               "rsi_1h": 24.0, "trigger_px": None,
+               "reasons": ["1h RSI 24 — oversold", "15m RSI 31 ↑ turning", "6.0%/day range"],
+               "grade": "WATCH"}]
+    body = alerts.format_preopen_brief([], "NEUTRAL", day="Jul 22", movers=movers,
+                                       movers_header="🧲 *OVERSOLD BOUNCE* — 1h RSI<30, upside potential")
+    assert "OVERSOLD BOUNCE" in body and "1h RSI 24" in body
+    assert "MOVERS WATCH" not in body
+
+
 def test_day_movers_capability_and_exclusions():
     import day_movers
     base = {

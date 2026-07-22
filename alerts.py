@@ -239,7 +239,8 @@ def _premarket_gaps(tickers: list, threshold_pct: float = 3.0) -> dict:
 def format_preopen_brief(ranked: list, regime_label: str = None,
                          open_trades: list = None, day: str = None,
                          macro_line: str = None, events: list = None,
-                         gaps: dict = None, movers: list = None) -> str | None:
+                         gaps: dict = None, movers: list = None,
+                         movers_header: str = None) -> str | None:
     """The best-of list before the New York open — compact enough for a phone.
 
     Top actionable setups (A/B with plans), then the strongest WATCH names
@@ -265,7 +266,7 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
 
     gaps = gaps or {}
     if movers:
-        lines.append("🚀 *MOVERS WATCH* — 5-10% day potential")
+        lines.append(movers_header or "🚀 *MOVERS WATCH* — 5-10% day potential")
         for m in movers:
             why = " · ".join(m["reasons"])
             trig = f" · watch >{m['trigger_px']}" if m.get("trigger_px") else ""
@@ -315,9 +316,16 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
     except Exception:
         pass
     movers = []
+    movers_header = None
     try:
-        import day_movers
-        movers = day_movers.build_watchlist(ranked)
+        import config as _cfg
+        if getattr(_cfg, "DAY_STRATEGY", "oversold") == "oversold":
+            import oversold
+            movers = oversold.scan(ranked)
+            movers_header = "🧲 *OVERSOLD BOUNCE* — 1h RSI<30, upside potential"
+        else:
+            import day_movers
+            movers = day_movers.build_watchlist(ranked)
     except Exception:
         pass
     graded_tickers = [s["ticker"] for s in ranked
@@ -327,7 +335,7 @@ def send_preopen_brief(ranked: list, regime_label: str = None, log: bool = True)
     body = format_preopen_brief(ranked, regime_label, open_trades,
                                 day=_dt.now().strftime("%b %d"),
                                 macro_line=macro_line, events=events, gaps=gaps,
-                                movers=movers)
+                                movers=movers, movers_header=movers_header)
     if body is None:
         # nothing actionable — still tell us once, silence is ambiguous
         body = (f"🔔 *PRE-OPEN BRIEF — {_dt.now().strftime('%b %d')}*\n\n"

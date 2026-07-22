@@ -83,6 +83,14 @@ MULTI_SIGNAL_THRESHOLD = 3  # Minimum buckets scoring above 60 to trigger alert
 # "all": legacy firehose (high-conviction, coiled, improving, watchlist moves).
 ALERT_MODE = "focused"
 
+# What fills the day-trading section of the pre-open brief:
+#   "oversold" — 1h RSI < 30 bounce candidates (Ruben's spec 2026-07-22:
+#                day-trading timeframes only, 1h + 15m, oversold = upside)
+#   "movers"   — the breakout-side day-movers list (capability x trigger)
+# Both are logged identically, so day_movers_scorecard box-scores whichever
+# is live and the hit rates decide which one earns the slot.
+DAY_STRATEGY = "oversold"
+
 # --- Default universe ---
 # Start with a broad small/mid-cap list. Override with a file or custom list.
 DEFAULT_UNIVERSE_FILE = "universe.txt"  # One ticker per line

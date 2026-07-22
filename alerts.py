@@ -249,7 +249,10 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
     graded = [s for s in ranked if (s.get("setup") or {}).get("grade") in ("A", "B")]
     watches = [s for s in ranked if (s.get("setup") or {}).get("grade") == "WATCH"]
     movers = movers or []
-    if not graded and not watches and not movers:
+    # oversold mode (a header is set): the day-trade watchlist is the point, so
+    # the brief always sends and always shows that section — an EMPTY list is a
+    # real result ("nothing oversold to fade"), not a reason to go silent
+    if not graded and not watches and not movers and not movers_header:
         return None
 
     lines = [f"🔔 *PRE-OPEN BRIEF*{' — ' + day if day else ''}", ""]
@@ -265,13 +268,15 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
         lines.append("")
 
     gaps = gaps or {}
-    if movers:
+    if movers or movers_header:
         lines.append(movers_header or "🚀 *MOVERS WATCH* — 5-10% day potential")
         for m in movers:
             why = " · ".join(m["reasons"])
             trig = f" · watch >{m['trigger_px']}" if m.get("trigger_px") else ""
             gap_note = f" ⚡{gaps[m['ticker']]:+.1f}% pre-mkt" if m["ticker"] in gaps else ""
             lines.append(f"${m['ticker']} {m['score']} — {why}{trig}{gap_note}")
+        if not movers:   # oversold mode, nothing below the line right now
+            lines.append("none below 30 — nothing oversold to fade right now")
         lines.append("")
     if graded:
         lines.append("🎯 swing setups:")

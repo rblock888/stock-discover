@@ -1168,6 +1168,84 @@ def factor_scorecard(horizon: int = 5) -> dict:
     }
 
 
+PARABOLIC_SIGNALS = [
+    ("par_n_pass", "criteria passed (collapsed)"),
+    ("par_n_pass_raw", "criteria passed (uncollapsed)"),
+    ("par_base", "base present"),
+    ("par_v_recovery", "V-recovery gate fired"),
+    ("par_rs20", "sector RS 20d (excess)"),
+    ("par_rs40", "sector RS 40d (excess)"),
+    ("par_rs20_mans", "sector RS 20d (Mansfield)"),
+    ("par_rs40_mans", "sector RS 40d (Mansfield)"),
+    ("par_T8_val", "distance above 20-DMA"),
+    ("par_T2_val", "12-week range %"),
+]
+
+
+def parabolic_scorecard(horizon: int = 5) -> dict:
+    """Does the parabolic criteria ledger predict forward returns?
+
+    Same method as factor_scorecard — per-DAY cross-sectional Spearman IC
+    (n = trading days, not rows) with a Newey-West t at lag = horizon-1.
+
+    The comparison that earns its keep here is par_n_pass vs par_n_pass_raw:
+    the collapsed and uncollapsed counts of the SAME checklist. If collapsing
+    V-recovery artifacts is the right call, the collapsed count should carry the
+    higher IC. If it does not, the collapse is costing information and should be
+    reverted — which is the only honest way to hold an opinion about it.
+
+    Report-only, on the same pre-registered gate as the academic factors."""
+    paired = _paired_bucket_rows(horizon)
+    out = {}
+    for key, label in PARABOLIC_SIGNALS:
+        rows = [(day, bs.get(key), ret) for day, bs, ret in paired
+                if bs.get(key) is not None]
+        dics = _daily_ics(rows)
+        vals = [v for _, v in dics]
+        t = _nw_tstat(vals, lag=horizon - 1)
+        mean_ic = float(np.mean(vals)) if vals else None
+        out[key] = {
+            "label": label,
+            "n_rows": len(rows),
+            "n_days": len(vals),
+            "mean_daily_ic": round(mean_ic, 3) if mean_ic is not None else None,
+            "t_nw": round(t, 2) if t is not None else None,
+            "positive_day_share": round(float(np.mean([v > 0 for v in vals])), 2) if vals else None,
+            "promotable": bool(len(vals) >= PROMOTE_MIN_DAYS and t is not None
+                               and abs(t) >= PROMOTE_MIN_ABS_T),
+        }
+
+    collapse = None
+    a, b = out.get("par_n_pass"), out.get("par_n_pass_raw")
+    if a and b and a["mean_daily_ic"] is not None and b["mean_daily_ic"] is not None \
+            and min(a["n_days"], b["n_days"]) >= MIN_DAYS_FACTOR:
+        delta = a["mean_daily_ic"] - b["mean_daily_ic"]
+        collapse = {
+            "collapsed_ic": a["mean_daily_ic"],
+            "uncollapsed_ic": b["mean_daily_ic"],
+            "delta": round(delta, 3),
+            "verdict": ("collapse helps" if delta > 0.01 else
+                        "collapse hurts — consider reverting" if delta < -0.01 else
+                        "no measurable difference"),
+        }
+
+    n_days_max = max((v["n_days"] for v in out.values()), default=0)
+    return {
+        "available": bool(out),
+        "status": "ready" if n_days_max >= MIN_DAYS_FACTOR else "accruing",
+        "horizon": horizon,
+        "n_days_max": n_days_max,
+        "need_days": MIN_DAYS_FACTOR,
+        "signals": out,
+        "collapse_test": collapse,
+        "promotable": [k for k, v in out.items() if v["promotable"]],
+        "detail": "par_* persists from new scans only, so this accrues from the deploy "
+                  "date. The collapse_test compares the V-recovery-collapsed criteria "
+                  "count against the naive sum of the same checklist — that is the "
+                  "measurement that decides whether the collapse was right.",
+    }
+
+
 def refresh(horizons=None) -> dict:
     """Recompute forward returns + scorecard + calibration. Never raises."""
     try:
@@ -1191,6 +1269,7 @@ def refresh(horizons=None) -> dict:
         # academic factor candidates — measured at 5d and 10d, the horizons where
         # a day-to-week app can actually act on the answer
         _cache["factor_scorecard"] = {h: factor_scorecard(h) for h in (5, 10)}
+        _cache["parabolic_scorecard"] = {h: parabolic_scorecard(h) for h in (5, 10)}
         # cross-horizon evidence matrix — is a bucket's IC consistent across 5/10/20/60d?
         matrix = {}
         for h in (horizons or HORIZONS):
@@ -1242,4 +1321,5 @@ def get_cached() -> dict:
         "intraday_scorecard": _cache.get("intraday_scorecard"),
         "day_movers_scorecard": _cache.get("day_movers_scorecard"),
         "factor_scorecard": _cache.get("factor_scorecard") or {h: factor_scorecard(h) for h in (5, 10)},
+        "parabolic_scorecard": _cache.get("parabolic_scorecard") or {h: parabolic_scorecard(h) for h in (5, 10)},
     }

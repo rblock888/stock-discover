@@ -29,6 +29,8 @@ CUTOVER_DATES = {
     "tradeable_backtest": "2026-07-02",     # setup stats = realistic fills + slippage
     "win_thresholds_scaled": "2026-07-02",  # win bar scales with horizon (5%@5d .. 17%@60d)
     "academic_factors": "2026-08-13",       # fac_* keys start persisting in bucket_scores
+    "parabolic_criteria": "2026-08-13",     # par_* keys start persisting
+    "grade_version_3": "2026-08-13",        # confluence collapses V-recovery artifacts
 }
 
 # --- Universe filters ---

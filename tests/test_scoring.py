@@ -1426,3 +1426,226 @@ def test_every_factor_has_metadata_and_controls_are_nonpositive():
         assert {"paper", "sharpe", "rebalance", "kind", "thesis"} <= set(meta)
     assert factors.CONTROLS == {k for k, v in factors.FACTORS.items() if v["sharpe"] <= 0}
     assert "fac_mom12_1" in factors.CONTROLS   # published at -0.008
+
+
+# ── parabolic criteria ledger + correlated-evidence collapse ────────────────
+
+import parabolic
+import sector_rs
+import conviction
+
+
+def _ohlcv(closes, highs=None, lows=None, vols=None):
+    c = np.asarray(closes, dtype=float)
+    n = len(c)
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    return pd.DataFrame({
+        "Open": c,
+        "High": c * 1.01 if highs is None else np.asarray(highs, float),
+        "Low": c * 0.99 if lows is None else np.asarray(lows, float),
+        "Close": c,
+        "Volume": np.full(n, 1e6) if vols is None else np.asarray(vols, float),
+    }, index=idx)
+
+
+def _v_shape(n=300, low=10.0, high=18.0, recover=25):
+    """Crash to a low then bounce hard off it — the V-recovery archetype.
+    `recover` = sessions since the low (the tweet's own example: 20)."""
+    pre = np.linspace(high, low, n - recover)
+    post = np.linspace(low, low * 1.6, recover)
+    return np.concatenate([pre, post])
+
+
+def test_v_recovery_gate_fires_on_a_bounce_off_a_recent_low():
+    out = parabolic.compute(_ohlcv(_v_shape()))
+    assert out["available"] is True
+    assert out["gates"]["v_recovery"] is True
+    assert out["gates"]["v_detail"]["sessions_ago"] <= parabolic.V_RECENT
+    assert out["base"]["present"] is False
+    assert out["verdict"].startswith("No base.")
+
+
+def test_v_recovery_gate_respects_its_recency_window():
+    """A bounce off a low that printed LONG ago is not a V-recovery. The window
+    is a definition, not a vibe — assert both sides of the boundary."""
+    inside = parabolic.compute(_ohlcv(_v_shape(recover=parabolic.V_RECENT - 5)))
+    outside = parabolic.compute(_ohlcv(_v_shape(recover=parabolic.V_RECENT + 15)))
+    assert inside["gates"]["v_recovery"] is True
+    assert outside["gates"]["v_recovery"] is False
+    # ...but the old runner still fails the base test on its own merits
+    assert outside["base"]["present"] is False
+
+
+def test_v_recovery_gate_quiet_on_a_flat_base():
+    rng = np.random.default_rng(11)
+    flat = 20 + rng.normal(0, 0.12, 300)
+    out = parabolic.compute(_ohlcv(flat))
+    assert out["gates"]["v_recovery"] is False
+
+
+def test_correlated_artifacts_collapse_to_one():
+    """The whole point: four trend checks that a single bounce satisfies
+    mechanically must count once, not four times."""
+    out = parabolic.compute(_ohlcv(_v_shape()))
+    if out["clusters"]:
+        cl = out["clusters"][0]
+        assert cl["counted_as"] == 1
+        assert cl["raw_count"] > 1
+        # the adjusted count must be strictly lower than the naive sum
+        assert out["n_pass_adjusted"] == out["n_pass"] - (cl["raw_count"] - 1)
+        assert out["n_pass_adjusted"] < out["n_pass"]
+
+
+def test_denominator_never_silently_shrinks():
+    """Uncomputable criteria must be NAMED and must never pass — reporting
+    'N/10' by dropping the five text-derived ones would be a lie."""
+    out = parabolic.compute(_ohlcv(_v_shape()))
+    assert out["n_total"] == 15
+    assert set(out["uncomputable"]) >= {"F2", "F3", "F5", "C2"}
+    for c in out["criteria"]:
+        if not c["computable"]:
+            assert c["passed"] is False
+    assert out["n_computable"] < out["n_total"]
+    assert "need filing text" in out["headline"]
+
+
+def test_ranges_use_the_period_low_as_denominator():
+    """A $39.20-$74.60 range is quoted +90% (74.6/39.2-1), not close-relative.
+    Mixing conventions would make half the ledger disagree with the other half."""
+    n = 300
+    c = np.full(n, 50.0)
+    highs = c.copy(); lows = c.copy()
+    highs[-60:] = 74.60
+    lows[-60:] = 39.20
+    out = parabolic.compute(_ohlcv(c, highs=highs, lows=lows))
+    t2 = next(x for x in out["criteria"] if x["key"] == "T2")
+    assert abs(t2["value"] - 90.3) < 1.0     # 74.60/39.20 - 1 = 90.3%
+    assert t2["passed"] is False             # way over the 40% cap
+
+
+def test_chase_limit_reports_value_even_when_passing():
+    rng = np.random.default_rng(5)
+    flat = 20 + rng.normal(0, 0.1, 300)
+    out = parabolic.compute(_ohlcv(flat))
+    t8 = next(x for x in out["criteria"] if x["key"] == "T8")
+    assert t8["value"] is not None and "20-DMA" in t8["detail"]
+
+
+def test_flat_ma_is_never_reported_as_rising():
+    """slope >= +0.5%/10d, so a dead-flat average cannot pass a 'rising' check."""
+    out = parabolic.compute(_ohlcv(np.full(300, 20.0)))
+    for key in ("T4", "T5"):
+        c = next(x for x in out["criteria"] if x["key"] == key)
+        assert c["passed"] is False
+
+
+def test_parabolic_survives_garbage():
+    for bad in (None, _ohlcv([]), "nonsense", _ohlcv(np.full(5, 1.0))):
+        out = parabolic.compute(bad)
+        assert isinstance(out, dict) and "available" in out
+
+
+def test_sector_rs_names_its_benchmark_and_flags_unmapped():
+    assert sector_rs.pick_benchmark(industry="Semiconductors") == ("SMH", True)
+    assert sector_rs.pick_benchmark(industry="Biotechnology") == ("XBI", True)
+    assert sector_rs.pick_benchmark(sector="Technology") == ("XLK", True)
+    # unmapped small cap -> IWM, and mapped=False so a brief can say so
+    etf, mapped = sector_rs.pick_benchmark(sector="", industry="", market_cap=2e8)
+    assert (etf, mapped) == ("IWM", False)
+    etf, mapped = sector_rs.pick_benchmark(sector="", industry="", market_cap=5e11)
+    assert (etf, mapped) == ("SPY", False)
+
+
+def test_mansfield_windows_must_actually_differ():
+    """Regression: the 20d and 40d Mansfield readings once reduced to the exact
+    same number because the SMA window was hard-coded to 20 regardless of n.
+    Two columns that can never disagree look like corroboration and carry no
+    extra information."""
+    rng = np.random.default_rng(21)
+    n = 300
+    b = 100 + np.cumsum(rng.normal(0, 0.5, n))
+    s_ = b * np.linspace(1.0, 1.4, n)          # steadily outperforming
+    m20 = sector_rs._mansfield(s_, b, 20)
+    m40 = sector_rs._mansfield(s_, b, 40)
+    assert m20 is not None and m40 is not None
+    assert abs(m20 - m40) > 1e-6, "windows collapsed to the same value"
+    # a persistent outperformer sits above BOTH its trailing ratio means
+    assert m20 > 0 and m40 > 0
+    # the longer window looks back further, so it reads a larger gap
+    assert m40 > m20
+
+
+def test_sector_rs_unavailable_is_not_zero():
+    """0.0 RS means 'exactly in line with its sector' — a real claim. Missing
+    data must not masquerade as it."""
+    out = sector_rs.compute(None, sector="Technology")
+    assert out["available"] is False
+    assert out["rs_20d"] is None
+    assert out["benchmark"] == "XLK"      # still names what it WOULD have used
+
+
+def _conviction_stock(v_recovery: bool):
+    return {
+        "composite": 60, "quote": {"market_cap": 5e8},
+        "breakdown": {b: {"raw": 50} for b in
+                      ("fundamentals", "momentum", "catalyst", "insider", "sentiment")},
+        "edge": {"bearing": {"state": "UP"}, "flow": {"state": "HEALTHY"}, "above_20ma": True},
+        "book": {"phase": {"state": "MARKUP"}, "profile": {"position": "above"},
+                 "ema": {"stack_bullish": True}, "context": {"ret_20d": 40, "ret_60d": 60}},
+        "coiled": {"state": "BASING"}, "smad": {"state": "NEUTRAL"},
+        "parabolic": {"gates": {"v_recovery": v_recovery}},
+    }
+
+
+def test_confluence_collapses_v_recovery_artifacts():
+    """The live defect this fixes: the same chart used to score four
+    confirmations for one bounce. It must now score strictly lower."""
+    hot = conviction.assess(_conviction_stock(True))
+    cold = conviction.assess(_conviction_stock(False))
+    assert hot["confluence"]["v_recovery"] is True
+    assert cold["confluence"]["v_recovery"] is False
+    assert len(hot["confluence"]["collapsed"]) >= 1
+    assert hot["confluence"]["technical"] < cold["confluence"]["technical"]
+    assert hot["confluence"]["total"] < cold["confluence"]["total"]
+
+
+def test_collapsed_factors_are_still_shown_not_hidden():
+    """Collapsing must not delete evidence from the checklist — a reader still
+    needs to see the factor and why it stopped counting."""
+    hot = conviction.assess(_conviction_stock(True))
+    clustered = [f for f in hot["confluence"]["factors"] if f.get("clustered")]
+    assert clustered, "collapsed factors must remain visible"
+    for f in clustered:
+        assert f["passed"] is True                 # still true, just not additive
+        assert "V-recovery artifact" in f["detail"]
+
+
+def test_grade_version_bumped_for_collapse():
+    """Grades before/after the collapse are not comparable; grade_scorecard
+    must not pool them."""
+    import config
+    assert conviction.GRADE_VERSION >= 3
+    assert "grade_version_3" in config.CUTOVER_DATES
+    assert "parabolic_criteria" in config.CUTOVER_DATES
+
+
+def test_persisted_par_values_are_numeric_only():
+    """par_*_val columns get rank-correlated. A label string in one would blow
+    up the IC the first time that column was measured."""
+    import db, json
+    out = parabolic.compute(_ohlcv(_v_shape()))
+    stock = {"ticker": "ZZNUM", "composite": 50, "quote": {"price": 10.0},
+             "breakdown": {b: {"raw": 50} for b in
+                           ("fundamentals", "momentum", "catalyst", "insider", "sentiment")},
+             "parabolic": out}
+    db.save_snapshot([stock], scan_date="2099-01-03T09:00:00")
+    row = [f for f in db.get_snapshot_features() if f["ticker"] == "ZZNUM"]
+    try:
+        bs = json.loads(row[0]["bucket_scores"])
+        vals = {k: v for k, v in bs.items() if k.startswith("par_") and k.endswith("_val")}
+        assert vals, "expected some par_*_val columns"
+        for k, v in vals.items():
+            assert isinstance(v, (int, float)) and not isinstance(v, bool), f"{k}={v!r}"
+    finally:
+        with db.get_conn() as c:
+            c.execute("DELETE FROM scan_snapshots WHERE ticker='ZZNUM'"); c.commit()

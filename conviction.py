@@ -23,7 +23,15 @@ each verdict carries a concrete entry / stop / target / R:R.
 # requires a live catalyst (>=60) or squeeze fuel (>=60) — the only measured
 # positive drivers. Funnel check: if <2 A-grades/week over 3 weeks, loosen the
 # catalyst clause to >=55 before touching anything else.
-GRADE_VERSION = 2
+#
+# v3 (2026-08-13): correlated-evidence collapse. confluence.total previously
+# summed all 18 factors as if independent, so a V-recovery — which mechanically
+# satisfies "above 20-DMA", "MARKUP", "EMA stack bullish" and "accepted in
+# value" simultaneously — scored four confirmations for one fact and inflated
+# exactly the already-run names this app exists to get ahead of. Those four now
+# collapse to one when the V-recovery gate fires. Grades before and after this
+# date are NOT comparable: the same chart scores lower now, by design.
+GRADE_VERSION = 3
 
 
 def _f(x, d=0.0):
@@ -143,9 +151,38 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
         # so a win-threshold change can't silently flood this factor
         fac("Measured win-rate", "context", cpw is not None and cpw >= cpw_gate, f"{cpw*100:.0f}%" if cpw is not None else ""),
     ]
-    n_tech = sum(1 for f in factors if f["group"] == "technical" and f["passed"])
-    n_fund = sum(1 for f in factors if f["group"] == "fundamental" and f["passed"])
-    n_ctx = sum(1 for f in factors if f["group"] == "context" and f["passed"])
+    # ── Correlated-evidence collapse ──
+    # A sharp V-recovery MECHANICALLY satisfies several trend checks at once: a
+    # name that bounced +40% off a recent low is necessarily above its 20-DMA,
+    # in MARKUP, stacked bullish, and "accepted in value". Counting those as
+    # independent confirmations counts ONE fact four times, and inflates exactly
+    # the names that have already run — the opposite of catching them early.
+    # This extends the precedent already in this file, where a +15%/20d name is
+    # refused the "Accumulation base" label; the counter now honours the same
+    # logic instead of quietly rewarding what the labeller rejects.
+    par = stock.get("parabolic") or {}
+    v_recovery = bool((par.get("gates") or {}).get("v_recovery"))
+    collapsed = []
+    if v_recovery:
+        artifacts = {"Accepted in value", "Phase: accumulation/markup",
+                     "EMA stack bullish", "Trend up (not down)"}
+        fired = [f for f in factors if f["label"] in artifacts and f["passed"]]
+        if len(fired) > 1:
+            # keep the first as the cluster's representative, mark the rest as
+            # counted-but-not-additive so the checklist still SHOWS them
+            for f in fired[1:]:
+                f["clustered"] = True
+                f["detail"] = (f["detail"] + " · " if f["detail"] else "") + \
+                              "V-recovery artifact (not counted twice)"
+            collapsed = [f["label"] for f in fired[1:]]
+
+    def _counts(group):
+        return sum(1 for f in factors
+                   if f["group"] == group and f["passed"] and not f.get("clustered"))
+
+    n_tech = _counts("technical")
+    n_fund = _counts("fundamental")
+    n_ctx = _counts("context")
     total = n_tech + n_fund + n_ctx
 
     # ── Hard AVOID vetoes ──
@@ -161,7 +198,9 @@ def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = N
     if flow == "THIN" and sstate not in ("SPRING", "DEMAND RETEST"):
         avoid.append("thin liquidity")
 
-    confluence = {"technical": n_tech, "fundamental": n_fund, "context": n_ctx, "total": total, "factors": factors}
+    confluence = {"technical": n_tech, "fundamental": n_fund, "context": n_ctx,
+                  "total": total, "factors": factors,
+                  "collapsed": collapsed, "v_recovery": v_recovery}
     score = min(100.0, 30 + 7 * n_tech + 8 * n_fund + 6 * n_ctx)
 
     if avoid:

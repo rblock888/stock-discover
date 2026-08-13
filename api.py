@@ -65,6 +65,8 @@ import news_cache
 import intraday_watch
 import volume_delta
 import factors
+import sector_rs
+import parabolic
 import macro_bias
 import econ_calendar
 import market_regime
@@ -719,6 +721,27 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         )
     except Exception:
         result["factors"] = dict(factors.UNAVAILABLE)
+
+    # Sector-relative strength + the parabolic criteria ledger. Both read frames
+    # market_regime already cached this cycle, so neither adds a network call.
+    # parabolic MUST run before conviction.assess() — its V-recovery gate is what
+    # stops the confluence counter from counting one bounce as four confirmations.
+    try:
+        q = result.get("quote") or {}
+        fund_raw = (bucket_scores.get("fundamentals") or {}).get("raw") or {}
+        rs = sector_rs.compute(hist, sector=q.get("sector"), industry=q.get("industry"),
+                               market_cap=q.get("market_cap"))
+        result["sector_rs"] = rs
+        cat_metrics = (bucket_scores.get("catalyst") or {}).get("metrics") or {}
+        result["parabolic"] = parabolic.compute(
+            hist, rs=rs, market_cap=q.get("market_cap"),
+            earnings_days=cat_metrics.get("earnings_days"),
+            financials=fund_raw.get("financials"),
+            info=fund_raw.get("info") or yf_info,
+        )
+    except Exception:
+        result["sector_rs"] = {"available": False}
+        result["parabolic"] = dict(parabolic.UNAVAILABLE)
 
     # Smart-money accumulation / demand-zone (supply/demand + institutional intent)
     try:

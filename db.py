@@ -214,6 +214,36 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 # and would quietly drag every IC toward noise.
                 for fk, fv in ((stock.get("factors") or {}).get("values") or {}).items():
                     bs[fk] = fv
+                # Parabolic criteria ledger — same contract: raw, unnormalized,
+                # absent-not-zero. Persists each criterion's PASS as 0/1 plus the
+                # measured value behind it, the benchmark actually used (so a
+                # silent SPY fallback stays discoverable after the fact), and the
+                # V-recovery gate, so the collapse can be audited retroactively.
+                par = stock.get("parabolic") or {}
+                if par.get("available"):
+                    for cr in par.get("criteria") or []:
+                        if cr.get("computable"):
+                            bs[f"par_{cr['key']}"] = 1 if cr["passed"] else 0
+                            # *_val columns get rank-correlated by evaluation, so
+                            # only numerics may land there — a stray label string
+                            # would blow up the IC the first time it was measured
+                            if isinstance(cr.get("value"), (int, float)) \
+                                    and not isinstance(cr["value"], bool):
+                                bs[f"par_{cr['key']}_val"] = cr["value"]
+                    bs["par_n_pass"] = par.get("n_pass_adjusted")
+                    bs["par_n_pass_raw"] = par.get("n_pass")
+                    bs["par_n_computable"] = par.get("n_computable")
+                    bs["par_base"] = 1 if par["base"].get("present") else 0
+                    bs["par_v_recovery"] = 1 if (par.get("gates") or {}).get("v_recovery") else 0
+                    bs["par_benchmark"] = par.get("benchmark")
+                    bs["par_bench_mapped"] = 1 if par.get("benchmark_mapped") else 0
+                    bs["par_ver"] = par.get("version")
+                rs_obj = stock.get("sector_rs") or {}
+                if rs_obj.get("available"):
+                    bs["par_rs20"] = rs_obj.get("rs_20d")
+                    bs["par_rs40"] = rs_obj.get("rs_40d")
+                    bs["par_rs20_mans"] = rs_obj.get("mansfield_20d")
+                    bs["par_rs40_mans"] = rs_obj.get("mansfield_40d")
                 bucket_scores = json.dumps(bs)
             coiled = (stock.get("coiled") or {}).get("coiled_score")
             smad_obj = stock.get("smad") or {}

@@ -64,6 +64,7 @@ import paper_ledger
 import news_cache
 import intraday_watch
 import volume_delta
+import factors
 import macro_bias
 import econ_calendar
 import market_regime
@@ -702,6 +703,22 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
             result["news_flags"] = {}
     except Exception:
         result["coiled"] = dict(pre_breakout.UNAVAILABLE)
+
+    # Academic factor candidates (awesome-systematic-trading). Report-only: these
+    # are persisted and IC-measured, and touch nothing in ranking until they earn
+    # it. Statements come from the fundamentals bucket's already-completed fetch,
+    # and SPY comes off price_history's TTL cache, so this adds no network calls.
+    try:
+        fund_raw = (bucket_scores.get("fundamentals") or {}).get("raw") or {}
+        result["factors"] = factors.compute(
+            hist,
+            info=fund_raw.get("info") or yf_info,
+            financials=fund_raw.get("financials"),
+            balance_sheet=fund_raw.get("balance_sheet"),
+            bench=price_history.get_history("SPY"),
+        )
+    except Exception:
+        result["factors"] = dict(factors.UNAVAILABLE)
 
     # Smart-money accumulation / demand-zone (supply/demand + institutional intent)
     try:

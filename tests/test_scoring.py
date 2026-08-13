@@ -1304,3 +1304,125 @@ def test_pre_breakout_detects_breakout_on_volume():
     out = pre_breakout.compute("X", f)
     assert out["available"] is True
     assert out["state"] == "BREAKING"
+
+
+# ── factors: academic anomalies from awesome-systematic-trading ──────────────
+
+import factors
+
+
+def _frame(closes, highs=None, vol=None):
+    n = len(closes)
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    c = np.asarray(closes, dtype=float)
+    return pd.DataFrame({
+        "Open": c, "High": (c * 1.01 if highs is None else np.asarray(highs, float)),
+        "Low": c * 0.99, "Close": c,
+        "Volume": (np.full(n, 1e6) if vol is None else np.asarray(vol, float)),
+    }, index=idx)
+
+
+def test_factor_signs_are_oriented_so_higher_is_better():
+    """Every factor must be oriented so HIGHER = the paper predicts a better
+    forward return. If a sign flips, every measured IC silently reverses meaning
+    and 'reproduces' would print for a factor that actually inverted."""
+    n = 300
+    # a name that FELL hard over the last week -> short-term reversal LONG leg
+    faller = np.concatenate([np.full(n - 6, 20.0), [19.0, 18.0, 17.0, 16.0, 15.0, 14.0]])
+    riser = np.concatenate([np.full(n - 6, 20.0), [21.0, 22.0, 23.0, 24.0, 25.0, 26.0]])
+    f_fall = factors.compute(_frame(faller))["values"]
+    f_rise = factors.compute(_frame(riser))["values"]
+    # loser scores HIGHER on short-term reversal than the winner
+    assert f_fall["fac_streversal"] > f_rise["fac_streversal"]
+    assert f_fall["fac_streversal"] > 0   # a decline yields a positive score
+
+
+def test_lowvol_prefers_the_calmer_stock():
+    rng = np.random.default_rng(7)
+    n = 300
+    calm = 20 + np.cumsum(rng.normal(0, 0.02, n))
+    wild = 20 + np.cumsum(rng.normal(0, 0.60, n))
+    calm_s = factors.compute(_frame(calm))["values"]["fac_lowvol"]
+    wild_s = factors.compute(_frame(wild))["values"]["fac_lowvol"]
+    assert calm_s > wild_s          # low vol ranks higher
+    assert calm_s < 0 and wild_s < 0  # negated vol is always negative
+
+
+def test_size_factor_prefers_the_smaller_cap():
+    small = factors.compute(None, info={"marketCap": 50_000_000})["values"]["fac_size"]
+    large = factors.compute(None, info={"marketCap": 50_000_000_000})["values"]["fac_size"]
+    assert small > large
+
+
+def test_asset_growth_prefers_the_slower_grower():
+    """Cooper/Gulen/Schill: the fastest asset growers subsequently underperform,
+    so the SLOW grower must score higher."""
+    idx = ["Total Assets"]
+    slow = pd.DataFrame([[102.0, 101.0, 100.5, 100.0]], index=idx)
+    fast = pd.DataFrame([[200.0, 170.0, 140.0, 100.0]], index=idx)
+    s = factors.compute(None, balance_sheet=slow)["values"]["fac_assetgrowth"]
+    f = factors.compute(None, balance_sheet=fast)["values"]["fac_assetgrowth"]
+    assert s > f
+
+
+def test_momentum_skips_the_most_recent_month():
+    """12-1 momentum must exclude the last ~22 sessions. Without the skip it
+    partially cancels against short-term reversal and both read as noise."""
+    n = 300
+    skip = factors.MOM_SKIP
+    c = np.concatenate([np.linspace(10, 20, n - skip), np.full(skip, 5.0)])  # crash in skipped month
+    v = factors.compute(_frame(c))["values"]["fac_mom12_1"]
+    assert v > 0   # the skipped crash must not drag the 12-1 score negative
+
+    # ...and the boundary must be exact: one MORE crashed bar reaches the window
+    # endpoint and flips the sign. This is the fencepost the constant guards.
+    c2 = np.concatenate([np.linspace(10, 20, n - skip - 1), np.full(skip + 1, 5.0)])
+    assert factors.compute(_frame(c2))["values"]["fac_mom12_1"] < 0
+
+
+def test_missing_data_is_absent_not_zero():
+    """A fabricated 0.0 is a real number to a rank correlation and would drag
+    every IC toward noise — unavailable factors must be omitted entirely."""
+    out = factors.compute(_frame(np.full(30, 10.0)))   # too short for most factors
+    assert "fac_mom12_1" not in out["values"]
+    assert "fac_trend" not in out["values"]
+    assert "fac_size" not in out["values"]            # no info dict supplied
+    assert all(v is not None for v in out["values"].values())
+
+
+def test_factors_survive_garbage_input():
+    for bad in (None, _frame([]), "nonsense"):
+        out = factors.compute(bad)
+        assert isinstance(out, dict) and "values" in out
+
+
+def test_beta_aligns_on_dates_not_positions():
+    """Two frames of equal length can cover different sessions; zipping them
+    positionally would correlate mismatched days and silently corrupt beta."""
+    rng = np.random.default_rng(3)
+    n = 300
+    bench_c = 400 + np.cumsum(rng.normal(0, 1.0, n))
+    bench = _frame(bench_c)
+    stock = _frame(bench_c * 0.05 + 10)          # near-perfectly correlated
+    stock = stock.iloc[5:]                        # ...but starting 5 sessions later
+    v = factors.compute(stock, bench=bench)["values"].get("fac_betaneg")
+    assert v is not None and math.isfinite(v)
+
+
+def test_factor_verdict_distinguishes_null_prior_from_reproduction():
+    """A paper reporting ~zero Sharpe cannot be 'reproduced' — signal found there
+    is a NEW result and must be labelled distinctly, not counted as confirmation."""
+    import evaluation
+    assert evaluation._factor_verdict(0.1, 3.0, 40, 0.816) == "reproduces"
+    assert evaluation._factor_verdict(-0.1, -3.0, 40, 0.816) == "inverts"
+    assert evaluation._factor_verdict(0.1, 3.0, 40, -0.008) == "beats_null_prior"
+    assert evaluation._factor_verdict(0.1, 0.4, 40, 0.816) == "no_edge"
+    assert evaluation._factor_verdict(0.1, 9.0, 3, 0.816) == "accruing"
+
+
+def test_every_factor_has_metadata_and_controls_are_nonpositive():
+    for name, meta in factors.FACTORS.items():
+        assert name.startswith("fac_")
+        assert {"paper", "sharpe", "rebalance", "kind", "thesis"} <= set(meta)
+    assert factors.CONTROLS == {k for k, v in factors.FACTORS.items() if v["sharpe"] <= 0}
+    assert "fac_mom12_1" in factors.CONTROLS   # published at -0.008

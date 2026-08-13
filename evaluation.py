@@ -1078,6 +1078,96 @@ def ledger_scorecard() -> dict:
     }
 
 
+MIN_DAYS_FACTOR = 15      # independent trading days before a factor gets a verdict
+PROMOTE_MIN_DAYS = 30     # pre-registered promotion gate — days ...
+PROMOTE_MIN_ABS_T = 2.5   # ... and Newey-West |t|, both required
+
+
+def _factor_verdict(mean_ic, t, n_days: int, sharpe: float) -> str:
+    """How the measured IC lands against the paper's published prior.
+
+    Deliberately asymmetric: 'reproduces' requires agreeing with a paper that
+    claimed a real edge, while a paper reporting ~zero Sharpe cannot be
+    'reproduced' at all — finding signal there is a genuinely new result and is
+    labelled as such rather than being quietly counted as a confirmation."""
+    if n_days < MIN_DAYS_FACTOR:
+        return "accruing"
+    if t is None or abs(t) < 2.0:
+        return "no_edge"
+    if abs(sharpe) < 0.05:
+        return "beats_null_prior"
+    return "reproduces" if (mean_ic > 0) == (sharpe > 0) else "inverts"
+
+
+def factor_scorecard(horizon: int = 5) -> dict:
+    """Do the academic factors from awesome-systematic-trading work HERE?
+
+    Each factor in factors.FACTORS is scored the same way the core buckets are:
+    per-DAY cross-sectional Spearman IC (n = trading days, never rows — 60 names
+    scored on one morning are one market draw), then a Newey-West t with
+    lag = horizon-1 to absorb the overlap between consecutive snapshots.
+
+    The published Sharpe is reported beside the measured IC so the two can be
+    read against each other. That comparison is the point: those Sharpes come
+    from long-short portfolios on large liquid names rebalanced monthly, while
+    this app is long-only micro/small-cap with day-to-week holds. Disagreement
+    is the expected case, not an error.
+
+    REPORT-ONLY. Nothing here feeds ranking. `promotable` marks a factor that
+    cleared the pre-registered bar (>= PROMOTE_MIN_DAYS days AND |t| >=
+    PROMOTE_MIN_ABS_T); promotion itself stays a deliberate, committed act."""
+    try:
+        import factors as _factors
+    except Exception as e:
+        return {"available": False, "status": "error", "detail": str(e)}
+
+    paired = _paired_bucket_rows(horizon)
+    out, n_rows_max = {}, 0
+    for name, meta in _factors.FACTORS.items():
+        rows = [(day, bs.get(name), ret) for day, bs, ret in paired
+                if bs.get(name) is not None]
+        n_rows_max = max(n_rows_max, len(rows))
+        dics = _daily_ics(rows)
+        vals = [v for _, v in dics]
+        t = _nw_tstat(vals, lag=horizon - 1)
+        mean_ic = float(np.mean(vals)) if vals else None
+        verdict = _factor_verdict(mean_ic, t, len(vals), meta["sharpe"])
+        out[name] = {
+            "paper": meta["paper"],
+            "published_sharpe": meta["sharpe"],
+            "rebalance": meta["rebalance"],
+            "kind": meta["kind"],
+            "thesis": meta["thesis"],
+            "is_control": name in _factors.CONTROLS,
+            "n_rows": len(rows),
+            "n_days": len(vals),
+            "mean_daily_ic": round(mean_ic, 3) if mean_ic is not None else None,
+            "sd_daily_ic": round(float(np.std(vals)), 3) if len(vals) > 1 else None,
+            "positive_day_share": round(float(np.mean([v > 0 for v in vals])), 2) if vals else None,
+            "t_nw": round(t, 2) if t is not None else None,
+            "verdict": verdict,
+            "promotable": bool(len(vals) >= PROMOTE_MIN_DAYS and t is not None
+                               and abs(t) >= PROMOTE_MIN_ABS_T),
+        }
+
+    ready = [k for k, v in out.items() if v["verdict"] not in ("accruing",)]
+    return {
+        "available": bool(out),
+        "status": "ready" if ready else "accruing",
+        "horizon": horizon,
+        "n_days_max": max((v["n_days"] for v in out.values()), default=0),
+        "need_days": MIN_DAYS_FACTOR,
+        "factors": out,
+        "promotable": [k for k, v in out.items() if v["promotable"]],
+        "detail": "Published Sharpes are long-short, large-cap, monthly-rebalanced; this "
+                  "app is long-only micro/small-cap held days. The prior is a direction to "
+                  "test, not evidence. Report-only — no factor touches ranking until it "
+                  f"clears {PROMOTE_MIN_DAYS} days at |t|>={PROMOTE_MIN_ABS_T}.",
+        "banner": "Factors persist from new scans only; pre-existing snapshots have no "
+                  "fac_* values and are excluded, so this accrues from the deploy date.",
+    }
+
+
 def refresh(horizons=None) -> dict:
     """Recompute forward returns + scorecard + calibration. Never raises."""
     try:
@@ -1098,6 +1188,9 @@ def refresh(horizons=None) -> dict:
         _cache["catalyst_components"] = catalyst_components(5)
         _cache["intraday_scorecard"] = intraday_scorecard()
         _cache["day_movers_scorecard"] = day_movers_scorecard()
+        # academic factor candidates — measured at 5d and 10d, the horizons where
+        # a day-to-week app can actually act on the answer
+        _cache["factor_scorecard"] = {h: factor_scorecard(h) for h in (5, 10)}
         # cross-horizon evidence matrix — is a bucket's IC consistent across 5/10/20/60d?
         matrix = {}
         for h in (horizons or HORIZONS):
@@ -1148,4 +1241,5 @@ def get_cached() -> dict:
         "evidence_weights_matrix": _cache.get("evidence_weights_matrix"),
         "intraday_scorecard": _cache.get("intraday_scorecard"),
         "day_movers_scorecard": _cache.get("day_movers_scorecard"),
+        "factor_scorecard": _cache.get("factor_scorecard") or {h: factor_scorecard(h) for h in (5, 10)},
     }

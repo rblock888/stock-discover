@@ -206,6 +206,14 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 bs["prefly_component"] = disc.get("prefly")
                 bs["attention_component"] = disc.get("attention")
                 bs["prefly_state"] = disc.get("state")
+                # Academic factor candidates (factors.py). Persisted raw and
+                # UNNORMALIZED — evaluation ranks them cross-sectionally per day,
+                # and Spearman is scale-invariant, so normalizing here would only
+                # destroy information. Absent factors stay absent: writing 0.0 for
+                # "couldn't compute" would be a real number to a rank correlation
+                # and would quietly drag every IC toward noise.
+                for fk, fv in ((stock.get("factors") or {}).get("values") or {}).items():
+                    bs[fk] = fv
                 bucket_scores = json.dumps(bs)
             coiled = (stock.get("coiled") or {}).get("coiled_score")
             smad_obj = stock.get("smad") or {}

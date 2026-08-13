@@ -195,6 +195,9 @@ def _run_full_pipeline():
                 result["discovery"] = disc_meta.get(ticker)
                 if disc_meta.get(ticker, {}).get("feed_hint"):
                     result["feed_hint"] = disc_meta[ticker]["feed_hint"]
+                # lane tag drives the day-trade scanners' exclusion and lets
+                # evaluation segment leader rows from microcap rows
+                result["lane"] = disc_meta.get(ticker, {}).get("lane") or "core"
                 results[ticker] = result
                 logger.info(f"  Scored {len(results)}/{TARGET_SCORED}: {ticker} = {result['composite']:.1f}")
             except Exception as e:

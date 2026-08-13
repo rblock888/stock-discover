@@ -47,6 +47,13 @@ def score_one(stock: dict) -> dict | None:
     q = stock.get("quote") or {}
     if v.get("grade") == "AVOID":
         return None
+    # Leader-lane names ($2-10B, $10+) are a different population from the
+    # micro/small caps this scanner — and the oversold scan built on it — were
+    # tuned against, and whose hit-rate scorecards have been accruing since July.
+    # Letting them in would change what the measurement is measuring midway
+    # through, which is the one thing CUTOVER_DATES exists to prevent.
+    if stock.get("lane") == "leader":
+        return None
     px = _f(q.get("price"))
     if px < MIN_PRICE or px * _f(q.get("avg_volume")) < MIN_DOLLAR_VOL:
         return None

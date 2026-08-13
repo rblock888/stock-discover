@@ -246,6 +246,80 @@ def from_finviz_basing(max_tickers: int = 60) -> list:
     return list(dict.fromkeys(tickers))[:max_tickers]
 
 
+# cap_mid is $2-10B EXACTLY. Deliberately not cap_midover, which has no ceiling
+# and returned 819 names — every mega cap in an uptrend, an index not a
+# watchlist. Module-level so the bound is assertable without scraping source.
+LEADER_FILTERS = ("cap_mid,sh_avgvol_o400,sh_price_o10,"
+                  "ta_sma20_pa,ta_sma50_pa,ta_sma200_pa,ta_highlow52w_b0to30")
+
+
+def from_finviz_leader(max_tickers: int = 60) -> list:
+    """Leader-continuation lane — established $2-10B names in a real uptrend.
+
+    A SEPARATE lane, deliberately not a widening of the microcap screens. The
+    existing lanes hard-cap at cap_smallunder ($2B) and sh_price_u50, which is
+    why a $57 / $2.7B name could never appear no matter how clean its setup was.
+    Loosening those caps in place would have flooded momentum.py, day_movers.py
+    and oversold.py with large caps and contaminated ICs that have been accruing
+    since July. Keeping it as its own source means the two populations stay
+    separately taggable and separately measurable.
+
+    Bounded ABOVE as well as below: cap_mid is $2-10B exactly. cap_midover has no
+    ceiling and returned 819 names — essentially every mega cap in an uptrend
+    (NVDA, MSFT, BRK, JPM), which is an index, not a watchlist.
+
+    The pattern is continuation, not reversal: above the 20/50/200-day averages
+    (an established trend, unlike the basing lane's off-the-high bias) and within
+    30% of the 52-week high. Verified live that COHU — the name that prompted
+    this lane — passes every clause.
+    """
+    tickers = []
+    try:
+        url = "https://finviz.com/screener.ashx"
+        params = {
+            "v": "111",
+            "f": LEADER_FILTERS,
+            "ft": "4",
+            # This screen returns ~389 names and we take ~80, so WHICH 80 matters.
+            # Sorting does not cure truncation — it decides what the truncation
+            # selects. Unsorted, Finviz returns ticker-alphabetical and the cap
+            # would silently mean "leaders whose ticker starts with A", the same
+            # defect that hid in squeeze_discovery for years.
+            #
+            # -perf26w = strongest 6-month performers, which is what "leader"
+            # actually means (relative-strength leadership, not merely liquidity).
+            # Verified to be honoured; -relativestrength is NOT — Finviz silently
+            # falls back to reverse-ticker order for tokens it does not recognise,
+            # so an unverified sort token is indistinguishable from no sort.
+            #
+            # Known tension, deliberately accepted: ranking by past performance
+            # biases toward names that have already moved, which is the opposite
+            # of this app's usual catch-it-early bias. That is the point of a
+            # CONTINUATION lane — and parabolic.py's base test and chase limit
+            # are what decide whether any given one is still entrable or already
+            # extended, rather than this screen pretending to know.
+            "o": "-perf26w",
+            "r": "1",
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                   "Accept": "text/html"}
+        for start in range(1, max_tickers + 1, 20):
+            params["r"] = str(start)
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                break
+            on_page = list(dict.fromkeys(
+                re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text)))
+            fresh = [t for t in on_page if t not in tickers]
+            tickers.extend(fresh)
+            if len(on_page) < 20 or not fresh:
+                break
+            time.sleep(0.5)
+    except Exception:
+        pass
+    return list(dict.fromkeys(tickers))[:max_tickers]
+
+
 def from_finviz(max_tickers: int = 100) -> list:
     """
     Scrape Finviz screener for small/mid caps with:
@@ -826,6 +900,9 @@ def build_universe(
             futures[pool.submit(from_finviz_microcap)] = "finviz_microcap"
             futures[pool.submit(from_finviz_basing)] = "finviz_basing"
             futures[pool.submit(from_finviz_biotech)] = "finviz_biotech"
+            # separate lane, its own source name — so leader names stay taggable
+            # and their ICs can be measured apart from the microcap population
+            futures[pool.submit(from_finviz_leader)] = "finviz_leader"
 
         if use_reddit:
             futures[pool.submit(from_reddit)] = "reddit"
@@ -887,6 +964,17 @@ def build_universe(
     for t, hint in _feed_hints.items():
         if t in discovery_meta:
             discovery_meta[t]["feed_hint"] = hint
+
+    # Lane tag. The leader lane is a structurally different population ($2-10B,
+    # $10+) from the micro/small-cap lanes, so it is marked here and persisted
+    # per snapshot. Two reasons this matters more than a cosmetic label:
+    #   • the day-trade scanners (day_movers, oversold) exclude it, so their ICs
+    #     keep measuring the one population they were tuned on;
+    #   • evaluation can segment leader vs microcap rows instead of pooling two
+    #     different return distributions into one meaningless average.
+    for t in sources.get("finviz_leader", []) or []:
+        if t in discovery_meta:
+            discovery_meta[t]["lane"] = "leader"
 
     return {
         "tickers": all_tickers,

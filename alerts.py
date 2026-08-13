@@ -236,6 +236,45 @@ def _premarket_gaps(tickers: list, threshold_pct: float = 3.0) -> dict:
     return gaps
 
 
+def _parabolic_lines(stock: dict) -> list:
+    """Compact criteria-ledger lines for one graded name — the vector, not the letter.
+
+    A grade alone is unfalsifiable to the reader: "B" says nothing about WHICH
+    checks failed. These lines lead with the structural verdict even when it is
+    negative ("No base.") and keep the name on the list with the failure
+    attached, rather than silently demoting or hiding it.
+
+    Kept to at most two short lines: this is read on a phone before the open."""
+    par = stock.get("parabolic") or {}
+    if not par.get("available"):
+        return []
+    out = []
+
+    # The structural verdict leads, but only when it is bad news — a passing
+    # base needs no announcement, a failing one changes how you size.
+    if par.get("base", {}).get("present") is False:
+        out.append(f"   ⚑ {par.get('verdict', '')}".rstrip())
+
+    bench = par.get("benchmark") or "?"
+    bench_note = bench if par.get("benchmark_mapped") else f"{bench}, no sector map"
+    fails = [c for c in par.get("criteria") or []
+             if c["computable"] and not c["passed"] and c["key"] != "T1"]
+    # short labels, not raw details — "fails: 90%, 52%" tells the reader nothing
+    # about WHAT is 90%, which is worse than saying nothing at all
+    named = ", ".join(c.get("short") or c["name"] for c in fails[:3])
+    more = f" +{len(fails) - 3}" if len(fails) > 3 else ""
+    tail = f" · fails: {named}{more}" if named else ""
+    out.append(f"   📋 {par.get('n_pass_adjusted')}/{par.get('n_computable')} "
+               f"vs {bench_note}{tail}")
+
+    # If evidence was collapsed, say so — otherwise the count silently
+    # disagrees with the checklist a reader can see on the dashboard.
+    for cl in par.get("clusters") or []:
+        out.append(f"   ↳ {cl['raw_count']} trend checks counted once "
+                   f"({cl['name'].lower()})")
+    return out
+
+
 def format_preopen_brief(ranked: list, regime_label: str = None,
                          open_trades: list = None, day: str = None,
                          macro_line: str = None, events: list = None,
@@ -286,6 +325,8 @@ def format_preopen_brief(ranked: list, regime_label: str = None,
         lines.append(f"[{v['grade']}] ${s['ticker']} — {v.get('setup', '')}")
         if pl.get("entry"):
             lines.append(f"   buy {pl['entry']} · stop {pl['stop']} · tgt {pl['target']} ({pl.get('rr', '?')}R)")
+        for ln in _parabolic_lines(s):
+            lines.append(ln)
         if s["ticker"] in gaps:
             g = gaps[s["ticker"]]
             lines.append(f"   ⚡ gapping {g:+.1f}% pre-market — plan is stale, re-plan at open")

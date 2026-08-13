@@ -179,8 +179,20 @@ def _base(c, highs, lows, vols, market_cap, v_fired):
     return (len(fails) == 0), fails, (round(rng * 100, 1) if rng is not None else None)
 
 
+# Phone-length labels. The full `name` and `detail` are for the dashboard; a
+# pre-open brief that prints "fails: 90%, 52%" tells the reader nothing about
+# WHAT is 90%, which is worse than printing nothing.
+SHORT_LABELS = {
+    "T1": "base", "T2": "12w range", "T3": "20d range", "T4": "50-DMA",
+    "T5": "100-DMA", "T6": "sector RS", "T7": "OBV", "T8": "chase limit",
+    "F1": "rev growth", "F2": "guidance", "F3": "guide trend",
+    "F4": "gross margin", "F5": "orders", "C1": "catalyst", "C2": "read-through",
+}
+
+
 def _crit(key, name, category, passed, computable=True, value=None, detail=""):
-    return {"key": key, "name": name, "category": category,
+    return {"key": key, "name": name, "short": SHORT_LABELS.get(key, name),
+            "category": category,
             "passed": bool(passed) if computable else False,
             "computable": bool(computable), "value": value, "detail": detail}
 

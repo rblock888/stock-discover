@@ -206,6 +206,10 @@ def save_snapshot(ranked_stocks: list, scan_date: str = None, ai_picks: list = N
                 bs["prefly_component"] = disc.get("prefly")
                 bs["attention_component"] = disc.get("attention")
                 bs["prefly_state"] = disc.get("state")
+                # which discovery lane surfaced this name — lets evaluation
+                # segment leader rows from microcap rows instead of pooling two
+                # different return distributions into one meaningless average
+                bs["disc_lane"] = stock.get("lane") or "core"
                 # Academic factor candidates (factors.py). Persisted raw and
                 # UNNORMALIZED — evaluation ranks them cross-sectionally per day,
                 # and Spearman is scale-invariant, so normalizing here would only

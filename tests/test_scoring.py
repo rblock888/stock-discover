@@ -1719,3 +1719,55 @@ def test_squeeze_screen_survives_stalled_pagination(monkeypatch):
     monkeypatch.setattr(squeeze_discovery.time, "sleep", lambda *_: None)
     got = squeeze_discovery._finviz_screen("dummy")
     assert len(got) == squeeze_discovery.PAGE_SIZE   # first page only, then bail
+
+
+# ── leader lane isolation ───────────────────────────────────────────────────
+
+import day_movers
+
+
+def _movable_stock(lane="core"):
+    """A name that day_movers would normally accept."""
+    return {
+        "ticker": "XYZ", "lane": lane,
+        "setup": {"grade": "B"},
+        "quote": {"price": 12.0, "avg_volume": 2_000_000},
+        "edge": {"pulse": {"atr_pct": 6.0}},
+        "coiled": {"state": "COILED", "pivot_price": 12.4, "pivot_prox": 0.95},
+        "breakdown": {"catalyst": {"raw": 70, "metrics": {"earnings_days": 20}}},
+        "short_squeeze": {"score": 40}, "vol_delta": {},
+    }
+
+
+def test_leader_lane_is_excluded_from_day_trade_scanners():
+    """The promise behind adding the lane: it must not contaminate the
+    day-mover / oversold hit-rate scorecards that have been accruing on a
+    micro/small-cap population."""
+    assert day_movers.score_one(_movable_stock("core")) is not None
+    assert day_movers.score_one(_movable_stock("leader")) is None
+
+
+def test_leader_lane_tag_is_persisted():
+    import db, json
+    stock = {"ticker": "ZZLANE", "composite": 50, "quote": {"price": 57.0},
+             "lane": "leader",
+             "breakdown": {b: {"raw": 50} for b in
+                           ("fundamentals", "momentum", "catalyst", "insider", "sentiment")}}
+    db.save_snapshot([stock], scan_date="2099-01-04T09:00:00")
+    row = [f for f in db.get_snapshot_features() if f["ticker"] == "ZZLANE"]
+    try:
+        assert json.loads(row[0]["bucket_scores"])["disc_lane"] == "leader"
+    finally:
+        with db.get_conn() as c:
+            c.execute("DELETE FROM scan_snapshots WHERE ticker='ZZLANE'"); c.commit()
+
+
+def test_leader_screen_is_bounded_above():
+    """cap_midover has no ceiling and returns ~819 names — essentially every
+    mega cap in an uptrend. The lane must stay bounded to the $2-10B zone."""
+    import universe_builder
+    f = universe_builder.LEADER_FILTERS
+    toks = f.split(",")
+    assert "cap_mid" in toks and "cap_midover" not in toks
+    assert "ta_sma200_pa" in toks       # established trend, not a bounce
+    assert "ta_highlow52w_b0to30" in toks

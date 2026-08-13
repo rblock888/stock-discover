@@ -1649,3 +1649,73 @@ def test_persisted_par_values_are_numeric_only():
     finally:
         with db.get_conn() as c:
             c.execute("DELETE FROM scan_snapshots WHERE ticker='ZZNUM'"); c.commit()
+
+
+# ── squeeze discovery: pagination coverage ──────────────────────────────────
+
+import squeeze_discovery
+
+
+def _fake_tickers(n):
+    """n unique LETTER-only tickers — the scraper regex is [A-Z]{1,5}, so
+    digit-bearing fakes would silently match only their leading letter."""
+    import itertools, string
+    out = ["".join(c) for c in itertools.product(string.ascii_uppercase, repeat=3)]
+    return out[:n]
+
+
+class _FakeResp:
+    def __init__(self, text): self.status_code, self.text = 200, text
+
+
+def _fake_finviz(all_tickers):
+    """Serve `all_tickers` 20-per-page, honouring the r= offset like Finviz."""
+    def get(url, params=None, headers=None, timeout=None):
+        start = int((params or {}).get("r", 1)) - 1
+        page = all_tickers[start:start + squeeze_discovery.PAGE_SIZE]
+        # each row links its ticker twice, as the real page does
+        html = "".join(f'<a href="stock?t={t}"></a><a href="quote.ashx?t={t}"></a>'
+                       for t in page)
+        return _FakeResp(html)
+    return get
+
+
+def test_squeeze_screen_pages_past_the_old_60_cap(monkeypatch):
+    """The bug: it stopped around 60 names, and Finviz returns alphabetical, so
+    the lane only ever saw tickers A-E of a ~190-name screen."""
+    universe = _fake_tickers(190)
+    monkeypatch.setattr(squeeze_discovery.requests, "get", _fake_finviz(universe))
+    monkeypatch.setattr(squeeze_discovery.time, "sleep", lambda *_: None)
+    got = squeeze_discovery._finviz_screen("dummy")
+    assert len(got) == 190, f"expected the whole screen, got {len(got)}"
+    assert got == universe                       # order preserved, no gaps
+    assert len(set(got)) == len(got)             # deduped across pages
+
+
+def test_squeeze_screen_stops_on_short_final_page(monkeypatch):
+    universe = _fake_tickers(25)   # 1 full page + a 5-name page
+    calls = {"n": 0}
+    inner = _fake_finviz(universe)
+
+    def counting_get(*a, **k):
+        calls["n"] += 1
+        return inner(*a, **k)
+
+    monkeypatch.setattr(squeeze_discovery.requests, "get", counting_get)
+    monkeypatch.setattr(squeeze_discovery.time, "sleep", lambda *_: None)
+    got = squeeze_discovery._finviz_screen("dummy")
+    assert got == universe
+    assert calls["n"] == 2, "must stop at the short page, not keep paging"
+
+
+def test_squeeze_screen_survives_stalled_pagination(monkeypatch):
+    """If Finviz ignores r= and keeps serving page 1, we must break rather than
+    loop to the safety stop burning 20 requests."""
+    def stuck(url, params=None, headers=None, timeout=None):
+        page = _fake_tickers(squeeze_discovery.PAGE_SIZE)
+        return _FakeResp("".join(f'<a href="stock?t={t}"></a>' for t in page))
+
+    monkeypatch.setattr(squeeze_discovery.requests, "get", stuck)
+    monkeypatch.setattr(squeeze_discovery.time, "sleep", lambda *_: None)
+    got = squeeze_discovery._finviz_screen("dummy")
+    assert len(got) == squeeze_discovery.PAGE_SIZE   # first page only, then bail

@@ -24,26 +24,50 @@ _HEADERS = {
 _FINVIZ = "https://finviz.com/screener.ashx"
 
 
-def _finviz_screen(filters: str, max_tickers: int = 80) -> list:
-    """Scrape Finviz screener with the given filter string."""
-    tickers = []
-    seen = set()
+PAGE_SIZE = 20
+MAX_PAGES = 20          # safety stop: 400 names is far beyond any of these screens
+
+
+def _finviz_screen(filters: str, max_pages: int = MAX_PAGES) -> list:
+    """Scrape a Finviz screen to EXHAUSTION, not to an arbitrary count.
+
+    This used to stop after ~60 names. Finviz returns ticker-alphabetical by
+    default, so the squeeze lane only ever saw tickers starting A-E — roughly a
+    third of a ~190-name screen, and the cut fell in the same place every run,
+    so nothing looked wrong. Sorting cannot fix it: Finviz silently falls back
+    to reverse-ticker order for sort tokens it does not recognise (verified —
+    `o=-shortfloat` returns ZBIO, XPOF, WYFI..., which is just Z-to-A), so a
+    sort-based fix would have swapped one alphabetical blind spot for another.
+
+    Paging to exhaustion is immune to that. Discovery over the full screen is
+    cheap (HTML, ~10 requests); it is the per-ticker yfinance SCORING that costs,
+    and that stays capped in discover_candidates() — but it now chooses from
+    every match rather than from whatever sorted first."""
+    tickers, seen = [], set()
     try:
-        for start in range(1, max_tickers + 1, 20):
+        for page in range(max_pages):
+            start = page * PAGE_SIZE + 1
             params = {"v": "111", "f": filters, "ft": "4", "r": str(start)}
             resp = requests.get(_FINVIZ, params=params, headers=_HEADERS, timeout=12)
             if resp.status_code != 200:
+                logger.warning(f"Finviz page {page + 1} returned {resp.status_code}")
                 break
-            batch = []
-            # Finviz moved from quote.ashx?t= to stock?t= links (2026) — match both
-            for t in re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text):
-                if t not in seen:
-                    seen.add(t)
-                    batch.append(t)
-            tickers.extend(batch)
-            if len(batch) < 10:
-                break
+            # Finviz moved from quote.ashx?t= to stock?t= links (2026) — match both.
+            # Each row links the ticker more than once, so de-dup within the page
+            # before deciding whether the page was full.
+            on_page = list(dict.fromkeys(
+                re.findall(r'(?:quote\.ashx|stock)\?t=([A-Z]{1,5})', resp.text)))
+            fresh = [t for t in on_page if t not in seen]
+            seen.update(fresh)
+            tickers.extend(fresh)
+            if len(on_page) < PAGE_SIZE:
+                break        # short page = last page
+            if not fresh:
+                break        # same names repeating = pagination stopped advancing
             time.sleep(0.6)
+        else:
+            logger.warning(f"Finviz screen hit the {max_pages}-page safety stop "
+                           f"({len(tickers)} names) — results may be truncated: {filters}")
     except Exception as e:
         logger.warning(f"Finviz scrape failed ({filters}): {e}")
     return tickers
@@ -54,24 +78,38 @@ def discover_candidates(max_tickers: int = 80) -> list:
     Find high-short-interest candidates from multiple Finviz screens.
     Deduplicates and prioritises tickers that appear in multiple screens.
     """
-    # Screen 1: short float >20%, float <100M, avg vol >200K, price >$1
-    s1 = _finviz_screen("sh_short_o20,sh_float_u100,sh_avgvol_o200,sh_price_o1", 60)
-    logger.info(f"  Screen 1 (short>20% + float<100M): {len(s1)} tickers")
-
-    # Screen 2: extreme short float >30%, any float — catches large-cap squeezes too
-    s2 = _finviz_screen("sh_short_o30,sh_avgvol_o200,sh_price_o1", 60)
-    logger.info(f"  Screen 2 (short>30%): {len(s2)} tickers")
-
-    # Screen 3: nano/micro float (<20M shares), moderate short interest >10%
-    s3 = _finviz_screen("sh_short_o10,sh_float_u20,sh_avgvol_o100,sh_price_o1", 60)
-    logger.info(f"  Screen 3 (nano float + short>10%): {len(s3)} tickers")
+    # (filters, label, weight) — weight reflects how much squeeze evidence the
+    # screen itself implies, and breaks ties among the majority of names that
+    # match only ONE screen. Without it, ranking by cross-screen count alone
+    # leaves that whole group in Finviz's default alphabetical order, which
+    # re-introduces the exact A-E bias the pagination fix just removed.
+    SCREENS = [
+        ("sh_short_o20,sh_float_u100,sh_avgvol_o200,sh_price_o1",
+         "short>20% + float<100M", 2),
+        ("sh_short_o30,sh_avgvol_o200,sh_price_o1",
+         "short>30% (extreme)", 3),
+        ("sh_short_o10,sh_float_u20,sh_avgvol_o100,sh_price_o1",
+         "nano float<20M + short>10%", 2),
+    ]
 
     counts: dict[str, int] = {}
-    for t in s1 + s2 + s3:
-        counts[t] = counts.get(t, 0) + 1
+    weights: dict[str, int] = {}
+    for filters, label, w in SCREENS:
+        found = _finviz_screen(filters)
+        logger.info(f"  Screen ({label}): {len(found)} tickers")
+        for t in found:
+            counts[t] = counts.get(t, 0) + 1
+            weights[t] = weights.get(t, 0) + w
 
-    # Sort by cross-screen frequency — appearing in multiple screens is a stronger signal
-    ranked = sorted(counts.keys(), key=lambda t: counts[t], reverse=True)
+    # Strongest evidence first: screen weight, then cross-screen frequency.
+    ranked = sorted(counts.keys(),
+                    key=lambda t: (weights[t], counts[t]), reverse=True)
+    if len(ranked) > max_tickers:
+        # Never truncate silently — a cap that is invisible reads as "we looked
+        # at everything" when it did not. This is the line that would have made
+        # the original A-E bug obvious years earlier.
+        logger.info(f"Squeeze discovery: {len(ranked)} unique candidates found, "
+                    f"scoring the top {max_tickers} by screen weight")
     return ranked[:max_tickers]
 
 

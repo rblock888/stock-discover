@@ -5,8 +5,12 @@ import config
 import fmp
 
 
-def _calc_momentum(closes: list, volumes: list) -> dict:
-    """Calculate momentum metrics from price/volume arrays (newest first)."""
+def _calc_momentum(closes: list, volumes: list, spy_closes: list = None) -> dict:
+    """Calculate momentum metrics from price/volume arrays (newest first).
+
+    spy_closes: ascending SPY closes — when provided, relative strength is
+    scored on SPY-EXCESS return (true RS), not raw absolute return.
+    """
     if len(closes) < config.MA_LONG:
         return {"score": 0, "details": "Insufficient price history", "components": {}}
 
@@ -18,14 +22,22 @@ def _calc_momentum(closes: list, volumes: list) -> dict:
     scores = []
     n = len(closes)
 
-    # Relative strength (stock return over lookback period)
-    rs_score = 50  # will be adjusted if we have SPY data
+    # Relative strength — SPY-excess return over the lookback (the real signal)
+    rs_score = 50  # neutral if we can't compute
     days = min(config.RS_LOOKBACK_DAYS, n - 1)
     if days > 10:
         stock_ret = (closes[-1] / closes[-days]) - 1
-        # Without SPY comparison, score based on absolute return
-        rs_score = min(100, max(0, 50 + stock_ret * 100))
-        components["return"] = f"{stock_ret:+.1%} ({days}d)"
+        if spy_closes is not None and len(spy_closes) > days and spy_closes[-days] > 0:
+            spy_ret = (spy_closes[-1] / spy_closes[-days]) - 1
+            excess = stock_ret - spy_ret
+            # Matching SPY → 50; +25% excess → 100; -25% → 0
+            rs_score = min(100, max(0, 50 + excess * 200))
+            components["rel_strength"] = f"{excess:+.1%} vs SPY"
+            components["return"] = f"{stock_ret:+.1%} ({days}d)"
+        else:
+            # No benchmark available — fall back to absolute return
+            rs_score = min(100, max(0, 50 + stock_ret * 100))
+            components["return"] = f"{stock_ret:+.1%} ({days}d)"
     scores.append(rs_score * 0.30)
 
     # 52-week high proximity
@@ -100,41 +112,34 @@ def _fmp_score(ticker: str) -> dict:
     return _calc_momentum(closes, volumes)
 
 
-def _yf_score(ticker: str) -> dict:
-    """Fallback to yfinance."""
+def _yf_score(ticker: str, hist=None) -> dict:
+    """Fallback to yfinance (via the shared, TTL-cached price_history fetcher)."""
     try:
-        import yfinance as yf
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
-        if hist.empty or len(hist) < config.MA_LONG:
+        import price_history
+        if hist is None:
+            hist = price_history.get_history(ticker, period="1y")
+        if hist is None or hist.empty or len(hist) < config.MA_LONG:
             return {"score": 0, "details": "Insufficient history", "components": {}}
 
         closes = hist["Close"].tolist()
         volumes = hist["Volume"].tolist()
 
-        result = _calc_momentum(list(reversed(closes)), list(reversed(volumes)))
-
-        # Add SPY comparison if possible
+        # SPY benchmark (fetched once per cycle via the shared cache) → true RS
+        spy_closes = None
         try:
-            spy = yf.Ticker("SPY").history(period="6mo")
-            if not spy.empty:
-                days = min(config.RS_LOOKBACK_DAYS, len(closes) - 1, len(spy) - 1)
-                if days > 10:
-                    stock_ret = (closes[-1] / closes[-days]) - 1
-                    spy_close = spy["Close"]
-                    spy_ret = (spy_close.iloc[-1] / spy_close.iloc[-days]) - 1
-                    excess = stock_ret - spy_ret
-                    result["components"]["rel_strength"] = f"{excess:+.1%} vs SPY"
+            spy = price_history.get_history("SPY", period="1y")
+            if spy is not None and not spy.empty:
+                spy_closes = spy["Close"].tolist()  # ascending
         except Exception:
             pass
 
-        return result
+        return _calc_momentum(list(reversed(closes)), list(reversed(volumes)), spy_closes=spy_closes)
     except Exception:
         return {"score": 0, "details": "Failed to fetch data", "components": {}}
 
 
-def score(ticker: str) -> dict:
-    """Return a momentum score (0-100)."""
+def score(ticker: str, hist=None) -> dict:
+    """Return a momentum score (0-100). Accepts a pre-fetched daily history frame."""
     if fmp.is_configured():
         return _fmp_score(ticker)
-    return _yf_score(ticker)
+    return _yf_score(ticker, hist=hist)

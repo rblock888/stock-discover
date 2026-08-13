@@ -1,41 +1,64 @@
 """Composite scorer: combines all bucket scores into a final ranking."""
 
+import math
+
 import config
 
 
-def composite_score(bucket_scores: dict) -> dict:
+def composite_score(bucket_scores: dict, weights: dict = None) -> dict:
     """
     Combine bucket scores into a weighted composite.
 
-    bucket_scores: dict with keys matching config.WEIGHTS keys,
-                   each value is a dict with at least {"score": float, "details": str}
+    bucket_scores: dict with keys matching the weight keys, each value a dict
+                   with at least {"score": float, "components": dict}.
+    weights: optional per-call weights (avoid mutating the global config.WEIGHTS,
+             which races across the scoring thread pool). Defaults to config.WEIGHTS.
+
+    A bucket with no real sub-signals (empty `components` — e.g. a throttled or
+    failed fetch) is treated as UNCOVERED: it's excluded from the composite and
+    the weights are renormalized over the covered buckets, so a data gap no
+    longer silently drags every score toward 50. The multi-signal alert only
+    counts covered buckets.
     """
-    weighted_total = 0
+    weights = weights or config.WEIGHTS
+    weighted_total = 0.0
+    covered_weight = 0.0
     breakdown = {}
     signals_above_60 = 0
 
-    for bucket, weight in config.WEIGHTS.items():
+    for bucket, weight in weights.items():
         bucket_data = bucket_scores.get(bucket, {"score": 0, "details": "N/A"})
         raw = bucket_data["score"]
-        weighted = raw * weight
-        weighted_total += weighted
+        # yfinance gaps can yield NaN scores — poison the composite + JSON
+        if not isinstance(raw, (int, float)) or not math.isfinite(raw):
+            raw = 0
+        components = bucket_data.get("components", {}) or {}
+        covered = len(components) > 0
         breakdown[bucket] = {
             "raw": raw,
             "weight": weight,
-            "weighted": round(weighted, 1),
+            "weighted": round(raw * weight, 1),
+            "covered": covered,
             "details": bucket_data.get("details", ""),
-            "components": bucket_data.get("components", {}),
+            "components": components,
+            "metrics": bucket_data.get("metrics"),  # raw sub-values (catalyst etc.) — inert if absent
         }
-        if raw >= 60:
-            signals_above_60 += 1
+        if covered:
+            weighted_total += raw * weight
+            covered_weight += weight
+            if raw >= 60:
+                signals_above_60 += 1
 
+    # Renormalize over covered weight (all covered → identical to before)
+    composite = weighted_total / covered_weight if covered_weight > 0 else 0.0
     multi_signal = signals_above_60 >= config.MULTI_SIGNAL_THRESHOLD
 
     return {
-        "composite": round(weighted_total, 1),
+        "composite": round(composite, 1),
         "breakdown": breakdown,
         "signals_above_60": signals_above_60,
         "multi_signal_alert": multi_signal,
+        "coverage": round(covered_weight, 3),  # fraction of weight backed by real data
     }
 
 

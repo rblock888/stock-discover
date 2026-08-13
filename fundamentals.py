@@ -94,7 +94,12 @@ def _yf_score(ticker: str) -> dict:
     scores.append(dilution_score * 0.15)
 
     total = sum(scores)
+    # Hand the already-fetched statements back to the caller. factors.py needs
+    # these same three objects for asset-growth/ROA/accruals/size; re-fetching
+    # them there would mean ~180 extra Yahoo calls per scan and would re-trigger
+    # the rate-limit starvation that once emptied a whole pre-open brief.
     return {"score": round(total, 1), "components": components,
+            "raw": {"info": info, "financials": financials, "balance_sheet": bs},
             "details": ", ".join(f"{k}: {v}" for k, v in components.items())}
 
 

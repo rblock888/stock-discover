@@ -8,6 +8,10 @@ def _fmp_score(ticker: str) -> dict:
     """Score using FMP API."""
     components = {}
     scores = []
+    # raw sub-component values — persisted per snapshot so evaluation can measure
+    # WHICH part of catalyst carries the IC (the tiered score alone can't say)
+    metrics = {"earnings_days": None, "target_upside": None, "rec_score": None,
+               "n_analysts": None, "src": "fmp"}
 
     quote = fmp.get_quote(ticker)
 
@@ -19,6 +23,8 @@ def _fmp_score(ticker: str) -> dict:
             try:
                 ed = datetime.strptime(e.get("date", ""), "%Y-%m-%d").date()
                 days_away = (ed - datetime.now().date()).days
+                if -5 <= days_away <= 120:
+                    metrics["earnings_days"] = days_away
                 if 0 < days_away <= 30:
                     earnings_score = 90
                     components["earnings"] = f"In {days_away} days"
@@ -41,6 +47,7 @@ def _fmp_score(ticker: str) -> dict:
         avg_target = targets[0].get("targetConsensus", 0) or targets[0].get("targetMean", 0)
         if avg_target and avg_target > 0:
             upside = (avg_target - price) / price
+            metrics["target_upside"] = round(upside, 4)
             if upside > 0.50:
                 target_score = 95
             elif upside > 0.25:
@@ -84,12 +91,19 @@ def _fmp_score(ticker: str) -> dict:
     scores.append(change_score * 0.20)
 
     total = sum(scores)
-    return {"score": round(total, 1), "components": components,
+    return {"score": round(total, 1), "components": components, "metrics": metrics,
             "details": ", ".join(f"{k}: {v}" for k, v in components.items())}
 
 
+CATALYST_VERSION = 2   # 2026-07-02: continuous mappings, coverage shrink, shadow event
+
+
 def _yf_score(ticker: str) -> dict:
-    """Fallback to yfinance."""
+    """Fallback to yfinance. v2 (anchor-preserving refinement of the measured
+    +0.24-IC shape): tiered cliffs became continuous maps, the analyst-target
+    slice shrinks toward neutral when coverage is thin (a single stale
+    analyst's +300% 'upside' was scoring 95), and a shadow news-event
+    classifier persists for IC measurement WITHOUT touching the score."""
     try:
         import yfinance as yf
         stock = yf.Ticker(ticker)
@@ -99,39 +113,45 @@ def _yf_score(ticker: str) -> dict:
 
     components = {}
     scores = []
+    n_analysts = info.get("numberOfAnalystOpinions")
+    metrics = {"earnings_days": None, "target_upside": None, "rec_score": None,
+               "n_analysts": n_analysts, "src": "yf", "ver": CATALYST_VERSION}
 
-    # Earnings
+    # Earnings proximity — continuous: sooner = hotter, floor at the old 60d tier
     earnings_score = 30
     try:
         cal = stock.calendar
         if cal and isinstance(cal, dict):
             ed = cal.get("Earnings Date")
             if ed:
+                # yfinance may return a list/range of dates — take the earliest
                 earnings_date = ed[0] if isinstance(ed, list) else ed
                 if hasattr(earnings_date, "date"):
                     days_away = (earnings_date.date() - datetime.now().date()).days
                 else:
                     days_away = (earnings_date - datetime.now().date()).days
-                if 0 < days_away <= 30:
-                    earnings_score = 90
+                if -5 <= days_away <= 120:
+                    metrics["earnings_days"] = days_away
+                if 0 < days_away <= 60:
+                    earnings_score = max(55.0, min(95.0, 95.0 - days_away * (2.0 / 3.0)))
                     components["earnings"] = f"In {days_away} days"
-                elif 0 < days_away <= 60:
-                    earnings_score = 60
-                    components["earnings"] = f"In {days_away} days"
+                elif -7 <= days_away <= 0:
+                    earnings_score = 70   # just reported — the print is fresh news
+                    components["earnings"] = "Just reported"
     except Exception:
         pass
     scores.append(earnings_score * 0.30)
 
-    # Target
-    target_score = 50
+    # Analyst target — continuous upside map, shrunk toward neutral by coverage
+    target_score = 50.0
     target = info.get("targetMeanPrice")
     current = info.get("currentPrice") or info.get("regularMarketPrice")
     if target and current and current > 0:
         upside = (target - current) / current
-        if upside > 0.50: target_score = 95
-        elif upside > 0.25: target_score = 75
-        elif upside > 0: target_score = 55
-        else: target_score = 20
+        metrics["target_upside"] = round(upside, 4)
+        raw = max(0.0, min(100.0, 50.0 + upside * 90.0))
+        coverage = min(1.0, (n_analysts or 0) / 3.0)
+        target_score = 50.0 + (raw - 50.0) * coverage
         components["target_upside"] = f"{upside:.0%}"
     scores.append(target_score * 0.25)
 
@@ -141,13 +161,23 @@ def _yf_score(ticker: str) -> dict:
     rec_map = {"strong_buy": 95, "buy": 80, "outperform": 70, "hold": 50, "sell": 10}
     if rec in rec_map:
         rec_score = rec_map[rec]
+        metrics["rec_score"] = rec_score
         components["recommendation"] = rec.replace("_", " ").title()
     scores.append(rec_score * 0.25)
 
-    scores.append(50 * 0.20)  # neutral for news
+    scores.append(50 * 0.20)  # news slice stays NEUTRAL — see shadow classifier below
+
+    # Shadow event classifier: persisted for IC measurement, zero score weight
+    # until it earns promotion (IC >= +0.05 at n >= 120 without degrading the
+    # main catalyst IC)
+    try:
+        import news_cache
+        metrics["event"] = news_cache.classify_event(ticker)
+    except Exception:
+        metrics["event"] = None
 
     total = sum(scores)
-    return {"score": round(total, 1), "components": components,
+    return {"score": round(total, 1), "components": components, "metrics": metrics,
             "details": ", ".join(f"{k}: {v}" for k, v in components.items())}
 
 

@@ -17,10 +17,13 @@ import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { BacktestPanel } from "@/components/BacktestPanel";
 import { ManualLookup } from "@/components/ManualLookup";
 import { PhotonicsCycle } from "@/components/PhotonicsCycle";
+import { Overview } from "@/components/Overview";
+import { ScorecardPanel } from "@/components/Scorecard";
+import { TickerDrawer } from "@/components/TickerDrawer";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type Tab = "picks" | "squeeze" | "photonics" | "portfolio" | "tools";
+type Tab = "overview" | "picks" | "squeeze" | "photonics" | "portfolio" | "tools";
 
 type Segment = {
   id: string;
@@ -53,6 +56,20 @@ function buildSegments(stocks: StockResult[]): Segment[] {
       matched.forEach((s) => used.add(s.ticker));
     }
   }
+
+  take(
+    "coiled",
+    "Early Upside",
+    "Coiled springs + smart-money accumulation — springs, demand-zone retests & breakouts caught early (not chasing)",
+    "var(--accent-cyan)",
+    (s) =>
+      (["BREAKING", "COILED", "BASING"].includes(s.coiled?.state ?? "") && (s.coiled?.coiled_score ?? 0) >= 55) ||
+      // smart-money early-long signals — but not if it's already extended (chase risk)
+      (["SPRING", "BOS IMPULSE", "DEMAND RETEST"].includes(s.smad?.state ?? "") && s.coiled?.state !== "EXTENDED"),
+    (a, b) =>
+      Math.max(b.coiled?.coiled_score ?? 0, b.smad?.smad_score ?? 0) -
+      Math.max(a.coiled?.coiled_score ?? 0, a.smad?.smad_score ?? 0),
+  );
 
   take(
     "squeeze",
@@ -492,6 +509,7 @@ function SqueezeView({ segments }: { segments: Segment[] }) {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
+  { id: "overview",  label: "Overview",  icon: "◉" },
   { id: "picks",     label: "Picks",     icon: "★" },
   { id: "squeeze",   label: "Squeeze",   icon: "⚡" },
   { id: "photonics", label: "Photonics", icon: "◎" },
@@ -527,8 +545,10 @@ function Sidebar({
       className="flex flex-col shrink-0"
       style={{
         width: 168,
-        backgroundColor: "var(--bg-surface)",
-        borderRight: "1px solid var(--border)",
+        background: "linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.015))",
+        backdropFilter: "blur(20px) saturate(1.3)",
+        WebkitBackdropFilter: "blur(20px) saturate(1.3)",
+        borderRight: "1px solid var(--glass-border)",
         height: "100vh",
         position: "sticky",
         top: 0,
@@ -640,7 +660,7 @@ function Sidebar({
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [tab, setTab] = useState<Tab>("picks");
+  const [tab, setTab] = useState<Tab>("overview");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -681,10 +701,7 @@ export default function Home() {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <div
-            className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin"
-            style={{ borderColor: "var(--accent)", borderTopColor: "transparent" }}
-          />
+          <div className="w-8 h-8 border-2 border-[var(--accent-bright)] border-t-transparent rounded-full animate-spin" />
           <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>
             {data?.scan_in_progress ? "Running scan…" : "Connecting…"}
           </p>
@@ -730,7 +747,7 @@ export default function Home() {
       />
 
       {/* Main content — scrollable */}
-      <div className="flex-1 overflow-y-auto" style={{ backgroundColor: "var(--bg-primary)" }}>
+      <div className="flex-1 overflow-y-auto" style={{ backgroundColor: "transparent" }}>
         {/* New-ticker banner */}
         {data?.new_tickers && data.new_tickers.length > 0 && (
           <div
@@ -743,6 +760,10 @@ export default function Home() {
         )}
 
         {/* Tab content */}
+        {tab === "overview" && (
+          <Overview data={data} onNavigate={(t) => setTab(t as Tab)} />
+        )}
+
         {tab === "picks" && (
           <PicksView segments={segments} ranked={data?.ranked ?? []} />
         )}
@@ -765,11 +786,15 @@ export default function Home() {
 
         {tab === "tools" && (
           <div className="p-5 max-w-[1200px] space-y-5">
+            <ScorecardPanel />
             <ManualLookup />
             <BacktestPanel />
           </div>
         )}
       </div>
+
+      {/* Per-ticker deep-dive drawer (opens via openTicker events) */}
+      <TickerDrawer />
     </div>
   );
 }

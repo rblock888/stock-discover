@@ -1,120 +1,91 @@
-"""
-News Sentiment Module
-=====================
-Replaces Reddit sentiment with news article sentiment.
+"""News sentiment v2 — TONE ONLY (cutover 2026-07-02).
 
-Uses yfinance news (free, works from servers) + TextBlob sentiment analysis.
-Scores based on:
-- News volume (how much coverage)
-- Sentiment polarity (positive vs negative tone)
-- Recency (recent news weighted higher)
-- Publisher diversity
+v1 blended tone (35%) with volume/acceleration/diversity (65%) and measured
+IC −0.19: coverage VOLUME peaks marked tops, poisoning the whole bucket. v2
+scores tone alone; volume/accel/diversity remain in components for DISPLAY
+and the attention count persists separately so its (suspected negative) IC
+can be measured on its own.
+
+Hard-negative override: TextBlob reads "announces public offering" as
+POSITIVE ("offering" scores well). Any fresh dilutive headline caps the tone
+score at 35.
+
+Weight stays at the 0.05 floor until post-cutover tone IC >= +0.05 at
+n >= 120 resolved returns; if it reads <= 0 at that n, it stays floored
+permanently — never inverted.
 """
 
 from datetime import datetime, timedelta
 from textblob import TextBlob
 
+import news_cache
+
+SENTIMENT_VERSION = 2
+
 
 def score(ticker: str) -> dict:
-    """Return news sentiment score (0-100)."""
-    try:
-        import yfinance as yf
-        stock = yf.Ticker(ticker)
-        news = stock.news
-    except Exception:
+    """Return news tone score (0-100). Never raises."""
+    items = news_cache.get_news(ticker)
+    if not items:
         return {"score": 50, "details": "News unavailable", "components": {}}
 
-    if not news:
-        return {"score": 40, "details": "No recent news", "components": {"articles": 0}}
-
-    components = {}
-    scores = []
     now = datetime.now()
     cutoff_recent = now - timedelta(days=14)
     cutoff_older = now - timedelta(days=45)
 
-    recent_articles = []
-    older_articles = []
-    publishers = set()
     sentiments = []
+    n_recent = n_older = n_dated_recent = 0
+    publishers = set()
 
-    for item in news[:30]:
-        try:
-            # yfinance news format can vary
-            content = item.get("content") or item
-            title = content.get("title", "") or item.get("title", "")
-            summary = content.get("summary", "") or content.get("description", "") or item.get("summary", "")
-            publisher = content.get("publisher", {}).get("name") if isinstance(content.get("publisher"), dict) else item.get("publisher", "Unknown")
-
-            # Get timestamp
-            pub_time = None
-            if "pubDate" in content:
-                try:
-                    pub_time = datetime.fromisoformat(content["pubDate"].replace("Z", "+00:00")).replace(tzinfo=None)
-                except Exception:
-                    pass
-            if not pub_time and "providerPublishTime" in item:
-                pub_time = datetime.fromtimestamp(item["providerPublishTime"])
-            if not pub_time:
-                pub_time = now - timedelta(days=7)  # assume recent
-
-            if pub_time > cutoff_older:
-                if pub_time > cutoff_recent:
-                    recent_articles.append({"title": title, "summary": summary})
-                else:
-                    older_articles.append({"title": title, "summary": summary})
-
-                if publisher:
-                    publishers.add(publisher)
-
-                # Sentiment analysis on title + first 200 chars of summary
-                text = f"{title} {summary[:200] if summary else ''}"
-                if text.strip():
-                    blob = TextBlob(text)
-                    sentiments.append(blob.sentiment.polarity)
-        except Exception:
+    for it in items:
+        pub_time = it.get("pub_time")
+        dated = pub_time is not None
+        if not pub_time:
+            pub_time = now - timedelta(days=7)   # undated: display buckets only
+        if pub_time <= cutoff_older:
             continue
+        if pub_time > cutoff_recent:
+            n_recent += 1
+            if dated:
+                n_dated_recent += 1
+        else:
+            n_older += 1
+        if it.get("publisher"):
+            publishers.add(it["publisher"])
+        text = f"{it.get('title', '')} {(it.get('summary') or '')[:200]}"
+        if text.strip():
+            sentiments.append(TextBlob(text).sentiment.polarity)
 
-    total_articles = len(recent_articles) + len(older_articles)
-    if total_articles == 0:
+    if n_recent + n_older == 0:
         return {"score": 40, "details": "No recent news", "components": {"articles": 0}}
 
-    # 1. Volume score (30% weight)
-    # 10+ articles in 14 days = strong coverage
-    volume_score = min(100, len(recent_articles) * 10)
-    components["articles"] = total_articles
-    scores.append(volume_score * 0.30)
-
-    # 2. Sentiment score (35% weight)
+    # ── the score: tone only ──
     if sentiments:
-        avg_sent = sum(sentiments) / len(sentiments)
-        # Map -1..1 to 0..100
-        sent_score = max(0, min(100, (avg_sent + 1) * 50))
-        components["tone"] = f"{avg_sent:+.2f}"
+        avg = sum(sentiments) / len(sentiments)
+        tone = max(0.0, min(100.0, (avg + 1) * 50))
     else:
-        sent_score = 50
-    scores.append(sent_score * 0.35)
+        avg, tone = 0.0, 50.0
 
-    # 3. Acceleration score (20% weight) - recent vs older
-    accel_score = 50
-    if older_articles:
-        accel = len(recent_articles) / max(1, len(older_articles))
-        accel_score = min(100, accel * 50)  # 2x acceleration = 100
-        components["trend"] = f"{accel:.1f}x"
-    elif recent_articles:
-        accel_score = 75
-        components["trend"] = "New coverage"
-    scores.append(accel_score * 0.20)
+    # dilution override — a fresh offering/reverse-split headline is not "positive"
+    # no matter how cheerful the press release reads
+    diluted = news_cache.fresh_dilution_headline(ticker)
+    if diluted:
+        tone = min(tone, 35.0)
 
-    # 4. Publisher diversity (15% weight)
-    diversity_score = min(100, len(publishers) * 20)
-    components["publishers"] = len(publishers)
-    scores.append(diversity_score * 0.15)
-
-    total = sum(scores)
+    components = {
+        "tone": f"{avg:+.2f}",
+        "articles": n_recent + n_older,                       # display only (v1 legacy)
+        "trend": f"{n_recent / max(1, n_older):.1f}x" if n_older else "new",
+        "publishers": len(publishers),
+        "attention": min(100, n_dated_recent * 10),           # persisted, measured separately
+        "ver": SENTIMENT_VERSION,
+    }
+    if diluted:
+        components["dilution_capped"] = True
 
     return {
-        "score": round(total, 1),
+        "score": round(tone, 1),
         "components": components,
-        "details": ", ".join(f"{k}: {v}" for k, v in components.items()),
+        "details": ", ".join(f"{k}: {v}" for k, v in components.items()
+                             if k not in ("attention", "ver")),
     }

@@ -1,0 +1,373 @@
+"""Conviction synthesis — the single answer: is this a good pick, and why?
+
+This is the books' **Trade Confluence Checklist** ("4+ checks = high-confluence
+setup"), adapted to a daily-bar US-stock scanner. It does NOT invent a new score;
+it counts how many independent factors line up across THREE groups —
+
+  TECHNICAL    the price-action setup (demand zone, reclaim, reversal, phase,
+               trend, volume, compression)            ← Supply & Demand Mastery
+  FUNDAMENTAL  company quality / fuel (fundamentals, catalyst, insiders,
+               squeeze, sentiment)                     ← the equity adaptation
+  CONTEXT      regime tailwind, liquidity, measured win-rate
+
+— and grades by CONFLUENCE. The rule the books insist on (and the owner's point):
+a top-grade pick needs BOTH a clean technical setup AND fundamentals behind it,
+not one without the other. A grade is only as good as the trade plan under it, so
+each verdict carries a concrete entry / stop / target / R:R.
+"""
+
+# Bump when the grading RULES change, so grade_scorecard never pools grades
+# minted under different regimes of logic. v2 (2026-07-02): sentiment moved out
+# of the counted fundamental group (measured IC -0.19 — the strongest anti-
+# signal we have was literally incrementing the A-gate), and grade A now
+# requires a live catalyst (>=60) or squeeze fuel (>=60) — the only measured
+# positive drivers. Funnel check: if <2 A-grades/week over 3 weeks, loosen the
+# catalyst clause to >=55 before touching anything else.
+#
+# v3 (2026-08-13): correlated-evidence collapse. confluence.total previously
+# summed all 18 factors as if independent, so a V-recovery — which mechanically
+# satisfies "above 20-DMA", "MARKUP", "EMA stack bullish" and "accepted in
+# value" simultaneously — scored four confirmations for one fact and inflated
+# exactly the already-run names this app exists to get ahead of. Those four now
+# collapse to one when the V-recovery gate fires. Grades before and after this
+# date are NOT comparable: the same chart scores lower now, by design.
+GRADE_VERSION = 3
+
+
+def _f(x, d=0.0):
+    try:
+        v = float(x)
+        return v if v == v else d
+    except (TypeError, ValueError):
+        return d
+
+
+def _raw(stock, bucket):
+    return _f((stock.get("breakdown", {}).get(bucket, {}) or {}).get("raw"))
+
+
+def assess(stock: dict, regime: dict | None = None, setup_stats: dict | None = None,
+           cpw_gate: float = 0.30) -> dict:
+    coiled = stock.get("coiled") or {}
+    smad = stock.get("smad") or {}
+    edge = stock.get("edge") or {}
+    book = stock.get("book") or {}
+    bearing = (edge.get("bearing") or {}).get("state")
+    flow = (edge.get("flow") or {}).get("state")
+    above20 = bool(edge.get("above_20ma"))
+    composite = _f(stock.get("composite"))
+    cpw = stock.get("calibrated_p_win")
+    tilt = _f((stock.get("tilt") or {}).get("factor"), 1.0)
+    q = stock.get("quote") or {}
+    mcap = _f(q.get("market_cap"))
+    sq = _f((stock.get("short_squeeze") or {}).get("score"))
+    comp = stock.get("competitors") or {}
+    mood = (regime.get("mood") or {}).get("label") if regime and regime.get("available") else None
+
+    vd = stock.get("vol_delta") or {}
+    cstate = coiled.get("state")
+    sstate = smad.get("state")
+    zone = smad.get("demand_zone")
+    phase = (book.get("phase") or {}).get("state")
+    rbs = book.get("rbs") or {}
+    rev = book.get("reversal") or {}
+    prof = book.get("profile") or {}
+    ema = book.get("ema") or {}
+    dbl = book.get("double_bottom") or {}
+    rhs = book.get("reverse_hns") or {}
+    plan = book.get("plan")
+
+    fund, cat, ins, sent = _raw(stock, "fundamentals"), _raw(stock, "catalyst"), _raw(stock, "insider"), _raw(stock, "sentiment")
+
+    # ── Primary setup (priority: earliest / highest-odds first) ──
+    setup, base_action = None, None
+    if sstate == "SPRING":
+        setup, base_action = "Spring reclaim", "Long the reclaim; stop below the sweep low"
+    elif sstate == "DEMAND RETEST":
+        setup, base_action = "Demand-zone retest", "Buy the zone retest; stop below the zone"
+    elif cstate == "BREAKING":
+        setup, base_action = "Breakout", "Entry on the break / first pullback"
+    elif sstate == "BOS IMPULSE":
+        setup, base_action = "Breakout (structure)", "Long the impulse / pullback to the zone"
+    elif rhs.get("confirmed") and phase != "MARKUP":
+        setup, base_action = "Reverse H&S", "Long the neckline break; stop below the right shoulder"
+    elif dbl.get("confirmed") and phase != "MARKUP":
+        setup, base_action = "Double bottom", "Long the neckline break; stop below the second low"
+    elif rbs.get("active"):
+        setup, base_action = "Reclaimed-level (RBS)", "Buy the held retest; stop below the level"
+    elif (dbl.get("active") or rhs.get("active")) and phase != "MARKUP" \
+            and _f((book.get("context") or {}).get("ret_60d")) < 15:
+        # a genuine pre-confirm bottom hasn't already rallied — a pattern whose
+        # neckline broke weeks ago and is now +20%/60d isn't "pre-confirm", it's stale
+        setup, base_action = "Bottoming (pre-confirm)", "On watch — needs the neckline break"
+    elif cstate == "COILED":
+        setup, base_action = "Coiled spring", "Watch for a volume break of the base pivot"
+    elif (cstate == "BASING" or sstate == "ACCUMULATION" or phase == "ACCUMULATION") \
+            and phase != "MARKUP" and prof.get("position") != "above" \
+            and _f((book.get("context") or {}).get("ret_20d")) < 15:
+        # a real base is quiet & sideways — not a name already +15%/20d into new highs
+        setup, base_action = "Accumulation base", "On watch — wait for the spring / break"
+    elif composite >= 62 and comp.get("lagging") and _f(comp.get("gap")) > 20:
+        setup, base_action = "Lagging catch-up", "Sector ran, this lagged — catch-up candidate"
+
+    # ── Confluence checklist ──
+    def fac(label, group, passed, detail=""):
+        return {"label": label, "group": group, "passed": bool(passed), "detail": detail}
+
+    factors = [
+        # TECHNICAL
+        fac("Setup present", "technical", bool(setup), setup or "no setup"),
+        fac("Fresh demand zone", "technical", bool(zone) and sstate in ("DEMAND RETEST", "BOS IMPULSE", "SPRING"),
+            f"${zone[0]}–${zone[1]}" if zone else ""),
+        fac("Reclaimed support (RBS)", "technical", rbs.get("active"), rbs.get("detail", "")),
+        fac("Reversal candle", "technical", rev.get("bullish") and rev.get("at_low"), rev.get("name", "")),
+        fac("Accepted in value", "technical", prof.get("position") in ("inside", "above"),
+            f"price {prof.get('position')} value" if prof else ""),
+        fac("Phase: accumulation/markup", "technical", phase in ("ACCUMULATION", "MARKUP"),
+            (book.get("phase") or {}).get("detail", "")),
+        fac("Double bottom / rev H&S", "technical", dbl.get("active") or rhs.get("active"),
+            "double bottom" if dbl.get("active") else ("reverse H&S" if rhs.get("active") else "")),
+        fac("EMA stack bullish", "technical", ema.get("stack_bullish") or ema.get("reclaim"),
+            "20>50>200" if ema.get("stack_bullish") else ("reclaimed 50EMA" if ema.get("reclaim") else "")),
+        fac("Trend up (not down)", "technical", above20 and bearing not in ("DOWN", "CHOPPY DOWN"), bearing or ""),
+        fac("Volume confirms", "technical", flow in ("HEALTHY", "CROWDED") or cstate == "BREAKING", flow or ""),
+        # daily-bar delta proxy (close-in-range × volume): is signed flow behind it?
+        fac("Flow accumulation (Δ proxy)", "technical",
+            vd.get("state") == "ACCUMULATION" or (vd.get("cmf20") or 0) >= 0.05
+            or vd.get("divergence") == "bullish",
+            vd.get("summary", "") if vd.get("available") else ""),
+        # FUNDAMENTAL
+        fac("Strong fundamentals", "fundamental", fund >= 60, f"{fund:.0f}/100"),
+        fac("Catalyst", "fundamental", cat >= 60, f"{cat:.0f}/100"),
+        fac("Insider / ownership", "fundamental", ins >= 55, f"{ins:.0f}/100"),
+        fac("Squeeze fuel", "fundamental", sq >= 60, f"{sq:.0f}/100"),
+        # sentiment measured at IC -0.19 (the strongest ANTI-signal) — shown on the
+        # checklist for information but no longer counted toward any grade gate
+        fac("Positive sentiment", "info", sent >= 55, f"{sent:.0f}/100"),
+        # CONTEXT
+        fac("Regime tailwind", "context", tilt >= 1.05 or mood == "RISK-ON", mood or f"tilt {tilt:.2f}"),
+        fac("Liquidity OK", "context", flow != "THIN", flow or ""),
+        # gate re-derives from the live calibration base rate (evaluation.cpw_gate)
+        # so a win-threshold change can't silently flood this factor
+        fac("Measured win-rate", "context", cpw is not None and cpw >= cpw_gate, f"{cpw*100:.0f}%" if cpw is not None else ""),
+    ]
+    # ── Correlated-evidence collapse ──
+    # A sharp V-recovery MECHANICALLY satisfies several trend checks at once: a
+    # name that bounced +40% off a recent low is necessarily above its 20-DMA,
+    # in MARKUP, stacked bullish, and "accepted in value". Counting those as
+    # independent confirmations counts ONE fact four times, and inflates exactly
+    # the names that have already run — the opposite of catching them early.
+    # This extends the precedent already in this file, where a +15%/20d name is
+    # refused the "Accumulation base" label; the counter now honours the same
+    # logic instead of quietly rewarding what the labeller rejects.
+    par = stock.get("parabolic") or {}
+    v_recovery = bool((par.get("gates") or {}).get("v_recovery"))
+    collapsed = []
+    if v_recovery:
+        artifacts = {"Accepted in value", "Phase: accumulation/markup",
+                     "EMA stack bullish", "Trend up (not down)"}
+        fired = [f for f in factors if f["label"] in artifacts and f["passed"]]
+        if len(fired) > 1:
+            # keep the first as the cluster's representative, mark the rest as
+            # counted-but-not-additive so the checklist still SHOWS them
+            for f in fired[1:]:
+                f["clustered"] = True
+                f["detail"] = (f["detail"] + " · " if f["detail"] else "") + \
+                              "V-recovery artifact (not counted twice)"
+            collapsed = [f["label"] for f in fired[1:]]
+
+    def _counts(group):
+        return sum(1 for f in factors
+                   if f["group"] == group and f["passed"] and not f.get("clustered"))
+
+    n_tech = _counts("technical")
+    n_fund = _counts("fundamental")
+    n_ctx = _counts("context")
+    total = n_tech + n_fund + n_ctx
+
+    # ── Hard AVOID vetoes ──
+    avoid = []
+    if sstate == "BULL TRAP":
+        avoid.append("fakeout — effort without result")
+    if cstate == "EXTENDED":
+        avoid.append(f"already extended +{_f(coiled.get('ret_3m_pct')):.0f}% in 3m")
+    if bearing == "DOWN" or phase == "MARKDOWN":
+        avoid.append("downtrend / markdown")
+    if phase == "DISTRIBUTION":
+        avoid.append("distribution — supply overhead")
+    if flow == "THIN" and sstate not in ("SPRING", "DEMAND RETEST"):
+        avoid.append("thin liquidity")
+
+    confluence = {"technical": n_tech, "fundamental": n_fund, "context": n_ctx,
+                  "total": total, "factors": factors,
+                  "collapsed": collapsed, "v_recovery": v_recovery}
+    score = min(100.0, 30 + 7 * n_tech + 8 * n_fund + 6 * n_ctx)
+
+    if avoid:
+        return {
+            "grade": "AVOID", "score": round(min(score, 30)), "setup": "—",
+            "thesis": "Avoid — " + ", ".join(avoid[:2]), "action": "Skip / wait for a cleaner setup",
+            "confluence": confluence, "plan": None, "positives": [], "cautions": avoid,
+        }
+    if not setup:
+        return {
+            "grade": "—", "score": round(min(score, 40)), "setup": "—",
+            "thesis": "No clear early-upside setup", "action": None,
+            "confluence": confluence, "plan": None, "positives": [], "cautions": [],
+        }
+
+    # ── Grade by CONFLUENCE — A demands BOTH technical AND fundamental alignment,
+    # AND an actionable plan with real reward-for-risk (the books' R:R rule). A
+    # watch-only setup (no tight entry) tops out at B no matter how it scores. ──
+    rr = _f(plan.get("rr")) if plan else None
+    actionable = bool(plan) and rr >= 1.8
+    # A additionally requires a LIVE driver: catalyst >=60 (the only bucket with
+    # measured positive IC, +0.24) or squeeze fuel >=60 (coverage-independent —
+    # a hard catalyst-only gate would exclude uncovered biotech/photonics names
+    # whose yfinance catalyst score caps at 44 with no analyst coverage).
+    if actionable and n_tech >= 3 and n_fund >= 2 and (cat >= 60 or sq >= 60) and n_ctx >= 1:
+        grade = "A"
+    elif n_tech >= 2 and n_fund >= 1:
+        grade = "B"
+    else:
+        grade = "C"
+
+    cautions = []
+    force_watch = False
+
+    # ── Event-risk gates (judgment-call risk control, like the AVOID vetoes —
+    # both logged/persisted with pre-registered kill criteria, not measured edges) ──
+    cat_metrics = (stock.get("breakdown", {}).get("catalyst", {}) or {}).get("metrics") or {}
+    earnings_days = cat_metrics.get("earnings_days")
+    # (a) earnings inside 3 days: a binary event the plan can't price — watch it,
+    # keep the plan visible, enter after the print. Kill criterion: if the ed<=3
+    # cohort's forward returns are NOT worse than 11-30d at n>=100/cohort, delete.
+    if plan and earnings_days is not None and 0 <= earnings_days <= 3:
+        cautions.append(f"earnings in {earnings_days}d — binary event, enter after the print")
+        force_watch = True
+    # (b) earnings in 4-10 days: an A-grade needs the reward to justify the event
+    elif earnings_days is not None and 4 <= earnings_days <= 10:
+        cautions.append(f"earnings in {earnings_days}d")
+        if grade == "A" and (rr or 0) < 2.5:
+            grade = "B"
+    elif cat >= 60 and earnings_days is not None and 11 <= earnings_days <= 14:
+        cautions.append(f"earnings within {earnings_days}d — binary event risk")
+    # (d) pre-revenue biotech: readouts (PDUFA etc.) aren't dated in yfinance —
+    # caution + size-down note only, NO grade cap (this is the core universe)
+    sector = (stock.get("quote") or {}).get("sector") or ""
+    if sector == "Healthcare" and fund < 40:
+        cautions.append("pre-revenue biotech — undated readout risk, size down")
+
+    # fresh dilution headline (computed once per scan in api via news_cache):
+    # a live offering/reverse-split/going-concern is an overhang no technical
+    # setup outruns — cap at WATCH, log the fire for false-positive inspection
+    dilution = (stock.get("news_flags") or {}).get("dilution")
+    if dilution:
+        cautions.append(f'fresh dilution headline: "{dilution[:80]}"')
+        force_watch = True
+
+    # ── R:R floor (audit): a plan that pays under 1.5R can't be an actionable buy ──
+    if plan and rr < 1.5:
+        cautions.append(f"thin reward-for-risk ({rr:.2f}R)")
+        grade = "C"
+        score = min(score, 50)
+
+    # ── Falling-knife guard (audit): a sharp bounce that's still deep below the 1y
+    # high is counter-trend risk, not a base breakout — keep it visible but demote ──
+    poh = _f((book.get("context") or {}).get("pct_off_high"))
+    if poh <= -50:
+        cautions.append(f"deep drawdown {poh:.0f}% off 1y high — falling-knife risk")
+        if grade in ("A", "B"):
+            grade = "C"
+    elif poh <= -30:
+        cautions.append(f"{poh:.0f}% below 1y high — bounce risk, not a clean base")
+        if grade == "A":   # a local markup deep below the 1y high is still counter-trend
+            grade = "B"
+
+    # ── Extended-into-supply (audit): a +25%/month run that's still under the prior
+    # distribution range (not a clean-air high) is a chase — dock it ──
+    ctx = book.get("context") or {}
+    ret20 = _f(ctx.get("ret_20d"))
+    if ret20 >= 25 and poh <= -12:
+        cautions.append(f"extended +{ret20:.0f}%/20d into overhead supply — chase risk")
+        score = max(0.0, score - 18)
+        if grade in ("A", "B"):
+            grade = "C"
+
+    # ── Phase/SMAD conflict (audit): book.phase and smad.state are computed
+    # independently and can disagree (phase=MARKUP while smad=ACCUMULATION) —
+    # that's the detector contradicting itself, not a clean read. Cap conviction
+    # rather than silently trusting whichever branch happened to fire the setup ──
+    if phase == "MARKUP" and sstate == "ACCUMULATION":
+        cautions.append("phase/SMAD conflict — MARKUP vs ACCUMULATION read")
+        if grade == "A":
+            grade = "B"
+
+    # ── No actionable plan (audit): a real setup with no defined entry/stop is a
+    # WATCH item (a forming base / pre-trigger), NOT a tradeable A/B/C buy ──
+    if not plan:
+        grade = "WATCH"
+        score = min(score, 50)
+
+    # ── Close the loop: demote setups the HISTORICAL backtest says don't work.
+    # avg_r is now the TRADEABLE leg (realistic fills + slippage); "strong edge"
+    # requires the LOWER-BOUND expectancy ≥ 0.05, not a raw small-n mean ──
+    stat = (setup_stats or {}).get(setup)
+    if stat and stat.get("n", 0) >= 30:
+        ar = _f(stat.get("avg_r"))
+        if ar < -0.05:
+            cautions.append(f"weak measured edge ({ar:+.2f}R tradeable, n={stat['n']})")
+            grade = {"A": "B", "B": "C", "C": "C"}.get(grade, grade)
+        elif _f(stat.get("expectancy_lb"), -9) >= 0.05:
+            cautions.append(f"strong measured edge ({ar:+.2f}R, lb {_f(stat.get('expectancy_lb')):+.2f}, "
+                            f"{stat.get('win_rate')}% win)")
+    # ── Delta-divergence warning (the book's strongest single tell): price at
+    # higher highs while signed volume flow makes LOWER highs = buyers printing
+    # candles while being absorbed. Bounded: caution + A→B only; the components
+    # persist per snapshot so this earns a harder gate only if its IC shows up ──
+    if vd.get("divergence") == "bearish":
+        cautions.append("bearish flow divergence — price up on fading signed volume "
+                        "(effort without result at the highs)")
+        if grade == "A":
+            grade = "B"
+
+    # demotion cap with hysteresis (state computed in setup_backtest: n>=50 and
+    # shrunk tradeable expectancy < 0.03; released only above 0.07)
+    if stat and stat.get("capped"):
+        cautions.append("no measured edge — shrunk tradeable expectancy below cap")
+        if grade == "A":
+            grade = "B"
+        score = min(score, 65)
+
+    # event-risk gates that force WATCH (imminent earnings / fresh dilution):
+    # applied LAST so no later adjustment can promote past them; the plan stays
+    # visible — these are "not yet", not "never"
+    if force_watch and grade in ("A", "B", "C"):
+        grade = "WATCH"
+        score = min(score, 55)
+
+    # thesis: setup + confluence + the most informative passing factor
+    lead = next((f for f in factors if f["passed"] and f["group"] == "fundamental"), None) \
+        or next((f for f in factors if f["passed"] and f["label"] not in ("Setup present", "Regime tailwind")), None)
+    bits = [setup, f"{n_tech}T·{n_fund}F confluence"]
+    if lead:
+        bits.append(f"{lead['label'].lower()} {lead['detail']}".strip())
+    if mood:
+        bits.append(mood.lower().replace("-", " ") + " tape")
+    thesis = " · ".join(b for b in bits if b)
+    if cautions:
+        thesis += " — " + cautions[0]
+
+    if plan:
+        verb = "Buy pullback to" if plan.get("entry_type") == "pullback" else "Buy"
+        action = f"{verb} ${plan['entry']}, stop ${plan['stop']}, target ${plan['target']} ({plan['rr']}R)"
+    else:
+        action = base_action
+
+    positives = [f"{f['label']} ({f['detail']})" if f["detail"] else f["label"]
+                 for f in factors if f["passed"] and f["group"] in ("technical", "fundamental")][:5]
+
+    return {
+        "grade": grade, "score": round(score), "setup": setup, "thesis": thesis, "action": action,
+        "confluence": confluence, "plan": plan, "positives": positives, "cautions": cautions,
+    }

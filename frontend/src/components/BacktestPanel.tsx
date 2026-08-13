@@ -85,8 +85,8 @@ export function BacktestPanel() {
         <div className="px-3 pb-3">
           <div className="text-[10px] uppercase tracking-[0.08em] mb-1" style={{ color: "var(--text-muted)" }}>Top Performers</div>
           <div className="flex flex-wrap gap-1.5">
-            {data.best_picks.slice(0, 5).map((p) => (
-              <div key={p.ticker} className="text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1" style={{ backgroundColor: "var(--green-dim)", border: "1px solid var(--green)" + "40" }}>
+            {data.best_picks.slice(0, 5).map((p, i) => (
+              <div key={`${p.ticker}-${i}`} className="text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1" style={{ backgroundColor: "var(--green-dim)", border: "1px solid var(--green)" + "40" }}>
                 <span className="font-bold">{p.ticker}</span>
                 <span className="tabular-nums" style={{ color: "var(--green)", fontFamily: "var(--font-mono)" }}>+{p.return_pct}%</span>
               </div>

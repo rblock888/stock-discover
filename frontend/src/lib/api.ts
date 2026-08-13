@@ -32,9 +32,99 @@ export interface ShortSqueezeResult {
   details: string;
 }
 
+export interface EdgeGauge {
+  state: string;
+  score: number;
+  summary: string;
+  advice: string[];
+  rvol?: number;
+  er?: number;
+  slope10_pct?: number;
+  atr_pct?: number;
+  atr_pctile?: number;
+}
+
+export interface EdgeBlock {
+  available: boolean;
+  above_20ma: boolean | null;
+  flow?: EdgeGauge;
+  bearing?: EdgeGauge;
+  pulse?: EdgeGauge;
+}
+
+export interface RegimeTilt {
+  factor: number;
+  reasons: string[];
+}
+
+export interface CoiledBlock {
+  available: boolean;
+  coiled_score: number;
+  state: "BREAKING" | "COILED" | "BASING" | "EXTENDED" | "NO SETUP" | "UNKNOWN";
+  summary?: string;
+  squeeze_pctile?: number;
+  range_pct?: number;
+  ext_pct?: number;
+  ret_3m_pct?: number;
+  pivot_prox?: number;
+  reasons?: string[];
+}
+
+export interface SmadBlock {
+  available: boolean;
+  smad_score: number;
+  state: "SPRING" | "BOS IMPULSE" | "DEMAND RETEST" | "ACCUMULATION" | "BULL TRAP" | "NONE" | "UNKNOWN";
+  summary?: string;
+  components?: { base: number; sweep_reclaim: number; impulse_bos: number; zone_retest: number };
+  trap?: string | null;
+  demand_zone?: [number, number] | null;
+  base_zone?: [number, number] | null;
+  reasons?: string[];
+}
+
+export interface ConfluenceFactor {
+  label: string;
+  group: "technical" | "fundamental" | "context";
+  passed: boolean;
+  detail: string;
+}
+
+export interface TradePlan {
+  entry: number;
+  stop: number;
+  target: number;
+  rr: number;
+  risk_pct: number;
+}
+
+export interface SetupVerdict {
+  grade: "A" | "B" | "C" | "WATCH" | "AVOID" | "—";
+  score: number;
+  setup: string;
+  thesis: string;
+  action: string | null;
+  confluence?: {
+    technical: number;
+    fundamental: number;
+    context: number;
+    total: number;
+    factors: ConfluenceFactor[];
+  };
+  plan?: TradePlan | null;
+  positives: string[];
+  cautions: string[];
+}
+
 export interface StockResult {
   ticker: string;
   composite: number;
+  edge?: EdgeBlock;
+  coiled?: CoiledBlock;
+  smad?: SmadBlock;
+  setup?: SetupVerdict;
+  calibrated_p_win?: number | null;
+  tilt?: RegimeTilt;
+  rank_score?: number;
   breakdown: {
     fundamentals: BucketScore;
     momentum: BucketScore;
@@ -175,15 +265,32 @@ export async function scoreSingle(ticker: string): Promise<StockResult> {
   return fetcher(`/api/score/${ticker}`);
 }
 
+export interface ScoreDelta {
+  ticker: string;
+  old_score: number;
+  new_score: number;
+  change: number;
+}
+
 export interface DashboardResponse {
   universe: UniverseResponse | null;
   ranked: StockResult[];
   alerts: string[];
   new_tickers: string[];
-  improving: { ticker: string; old_score: number; new_score: number; change: number }[];
+  improving: ScoreDelta[];
+  decaying: ScoreDelta[];
+  breadth: { pct_above_20ma: number | null; n: number } | null;
+  market_regime: { score: number; label: string; vix: number; as_of: string } | null;
   last_scan: string | null;
   scan_in_progress: boolean;
   next_scan_in: number;
+  setup_stats: Record<string, SetupStat> | null;
+}
+
+export interface SetupStat {
+  win_rate: number;
+  avg_r: number;
+  n: number;
 }
 
 export async function getDashboard(): Promise<DashboardResponse> {
@@ -406,4 +513,288 @@ export async function getSqueezeScan(): Promise<SqueezeScanResponse> {
 
 export async function rescanSqueeze(): Promise<{ status: string }> {
   return fetcher("/api/squeeze-scan/rescan", { method: "POST" });
+}
+
+// ─── Market Regime ───
+
+export interface IndexTrend {
+  state: "UPTREND" | "PULLBACK" | "RECOVERY" | "DOWNTREND" | "CHOP";
+  points: number;
+  close: number;
+  vs_20ma_pct: number;
+  ret_1m_pct: number | null;
+}
+
+export interface SectorHeat {
+  etf: string;
+  name: string;
+  ret_1m_pct: number | null;
+  ret_5d_pct: number | null;
+  above_20ma: boolean;
+}
+
+export interface RegimeStripDay {
+  snap_date: string;
+  mood_score: number;
+  label: string;
+  vix: number;
+}
+
+export interface MacroAsset {
+  key: string;
+  name: string;
+  symbol: string;
+  bias: "BULLISH" | "NEUTRAL" | "BEARISH";
+  score: number;
+  ret_1m_pct: number | null;
+  ret_5d_pct: number | null;
+  risk_sign: number;
+}
+
+export interface MacroDesk {
+  available: boolean;
+  assets: MacroAsset[];
+  bias_score: number;
+  bias_label: "RISK-ON" | "NEUTRAL" | "RISK-OFF";
+  narrative: string;
+}
+
+export interface FlowMover {
+  symbol: string;
+  name: string;
+  ret_5d_pct: number;
+}
+
+export interface CapitalFlow {
+  available: boolean;
+  flow_score?: number;
+  flow_label?: "RISK-SEEKING" | "BALANCED" | "DEFENSIVE";
+  risk_on_ret_5d?: number;
+  risk_off_ret_5d?: number;
+  risk_on_ret_1m?: number | null;
+  risk_off_ret_1m?: number | null;
+  leaders?: FlowMover[];
+  laggards?: FlowMover[];
+}
+
+export interface MarketRegimeResponse {
+  available: boolean;
+  as_of?: string;
+  stale?: boolean;
+  mood?: { score: number; label: "RISK-ON" | "NEUTRAL" | "RISK-OFF" };
+  indices?: Record<string, IndexTrend>;
+  volatility?: { state: "QUIET" | "TRADABLE" | "WILD"; vix: number; percentile: number; change_5d_pct: number | null; score: number };
+  smallcap?: { state: "HOT" | "NEUTRAL" | "COLD"; score: number; rel_1m_pct: number | null; rel_3m_pct: number | null };
+  sectors?: SectorHeat[];
+  breadth?: { universe_pct: number | null; universe_n: number | null; sectors_pct: number };
+  narrative?: string;
+  advice?: string[];
+  strip?: RegimeStripDay[];
+  macro_desk?: MacroDesk;
+  capital_flow?: CapitalFlow;
+  macro_bias?: MacroBias[];
+  econ_events?: EconEvent[];
+}
+
+export async function getMarketRegime(): Promise<MarketRegimeResponse> {
+  return fetcher("/api/market-regime");
+}
+
+// ─── Daily Brief ───
+
+export interface BriefBullet {
+  type: "new" | "improving" | "decaying" | "squeeze" | "pick" | "watchlist";
+  text: string;
+}
+
+export interface Brief {
+  headline: string;
+  paragraph: string;
+  bullets: BriefBullet[];
+  generated_at: string;
+  source: "template" | "llm";
+}
+
+export async function getBrief(): Promise<{ brief: Brief | null; last_scan: string | null }> {
+  return fetcher("/api/brief");
+}
+
+// ─── Score history ───
+
+export interface HistoryPoint {
+  scan_date: string;
+  composite: number | null;
+  ml_score: number | null;
+  price: number | null;
+}
+
+export interface HistoryResponse {
+  ticker: string;
+  points: HistoryPoint[];
+  count: number;
+}
+
+export async function getHistory(ticker: string): Promise<HistoryResponse> {
+  return fetcher(`/api/history/${ticker}`);
+}
+
+export interface PriceHistory {
+  ticker: string;
+  points: { date: string; close: number }[];
+}
+
+export async function getPriceHistory(ticker: string): Promise<PriceHistory> {
+  return fetcher(`/api/price-history/${ticker}`);
+}
+
+// ─── Model Scorecard (closed-loop evaluation) ───
+
+export interface ScoreDecile {
+  bin: number;
+  score_lo: number;
+  score_hi: number;
+  n: number;
+  avg_return_pct: number;
+  avg_excess_pct: number | null;
+  win_rate: number;
+  beat_spy_rate: number | null;
+}
+
+export interface SignalCard {
+  ic: number;
+  ic_excess: number | null;
+  n: number;
+  deciles: ScoreDecile[];
+  top_minus_bottom_pct: number;
+  top_win_rate: number;
+  bottom_win_rate: number;
+}
+
+export interface Scorecard {
+  available: boolean;
+  horizon: number;
+  n: number;
+  overall_avg_return_pct?: number;
+  overall_win_rate?: number;
+  overall_beat_spy_rate?: number | null;
+  signals?: Record<string, SignalCard>;
+  detail?: string;
+}
+
+export interface CalibrationCurve {
+  available: boolean;
+  signal?: string;
+  horizon?: number;
+  win_threshold?: number;
+  n?: number;
+  base_rate?: number;
+  curve?: { score: number; p_win: number; n: number }[];
+}
+
+export interface DataStatus {
+  tickers_scored: number;
+  tickers_with_price_history: number;
+  junk_tickers: number;
+  trading_days_deep: number;
+  first_day: string | null;
+  last_day: string | null;
+  resolved_by_horizon: Record<string, number>;
+  horizons: number[];
+}
+
+export interface EvidenceWeights {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  need?: number;
+  horizon: number;
+  n_days_5d?: number;
+  n_days_10d?: number;
+  need_days?: number;
+  bucket_ic?: Record<string, number | null>;
+  current_weights: Record<string, number>;
+  recommended_weights?: Record<string, number>;
+  shrunk_weights?: Record<string, number>;
+  naive_ic_weights?: Record<string, number>;
+  detail: string;
+}
+
+export interface TiltAB {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  moved?: number;
+  need?: number;
+  horizon: number;
+  ic_base?: number;
+  ic_tilt?: number;
+  ic_delta?: number;
+  top_quartile_base_pct?: number;
+  top_quartile_tilt_pct?: number;
+  tilt_helps?: boolean;
+  detail: string;
+}
+
+export interface GradeRow {
+  grade: "A" | "B" | "C" | "WATCH" | "AVOID" | "—";
+  n: number;
+  low_n: boolean;
+  avg_return_pct: number;
+  avg_excess_pct: number | null;
+  win_rate: number;
+  beat_spy_rate: number | null;
+}
+
+export interface GradeInversion {
+  worse_grade: string;
+  better_grade: string;
+  worse_avg_excess_pct: number;
+  better_avg_excess_pct: number;
+  detail: string;
+}
+
+export interface GradeScorecard {
+  available: boolean;
+  status: "ready" | "accruing";
+  n: number;
+  need?: number;
+  horizon: number;
+  grade_ic?: number;
+  grades?: GradeRow[];
+  inversion?: GradeInversion | null;
+  avoid_outperforms_a?: boolean;
+  detail: string;
+}
+
+export interface ScorecardResponse {
+  scorecards: Record<string, Scorecard> | null;
+  data_status: DataStatus;
+  last_run: string | null;
+  calibration: Record<string, CalibrationCurve>;
+  evidence_weights?: EvidenceWeights;
+  tilt_ab?: TiltAB;
+  grade_scorecard?: Record<string, GradeScorecard>;
+}
+
+export async function getScorecard(): Promise<ScorecardResponse> {
+  return fetcher("/api/scorecard");
+}
+
+export interface MacroBias {
+  symbol: string;
+  name: string;
+  bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+  score: number;
+  price: number;
+  chg_1d_pct: number;
+  cmf: number | null;
+  above_20ma: boolean;
+  above_50ma: boolean;
+}
+
+export interface EconEvent {
+  date: string;
+  name: string;
+  time_et: string;
+  days_away: number;
 }

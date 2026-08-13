@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -12,14 +14,20 @@ from pydantic import BaseModel
 
 
 def _clean(obj):
-    """Recursively convert numpy/pandas types to native Python types."""
+    """Recursively convert numpy/pandas types to native Python types.
+
+    Also maps non-finite floats (NaN/inf) to None — json.dumps raises on them,
+    which would 500 an entire endpoint over one bad yfinance value.
+    """
     if obj is None:
         return None
-    # numpy bool
+    # numpy scalar → native
     if hasattr(obj, "item") and hasattr(obj, "dtype"):
-        return obj.item()
+        obj = obj.item()
     if isinstance(obj, bool):
         return bool(obj)
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -46,6 +54,26 @@ import axt_filter
 import photonics_cycle
 import short_squeeze
 import squeeze_discovery
+import price_history
+import ticker_edge
+import pre_breakout
+import smad
+import book_signals
+import setup_backtest
+import paper_ledger
+import news_cache
+import intraday_watch
+import volume_delta
+import factors
+import sector_rs
+import parabolic
+import macro_bias
+import econ_calendar
+import market_regime
+import brief as brief_composer
+import evaluation
+import regime_tilt
+import conviction
 
 # Initialize database
 db.init_db()
@@ -87,6 +115,28 @@ squeeze_cache = {
     "scan_in_progress": False,
 }
 
+brief_cache = {"brief": None}
+
+
+def _recompose_brief():
+    """Rebuild the daily brief from current caches. Never raises."""
+    try:
+        scan = {
+            "ranked": cache.get("ranked") or [],
+            "new_tickers": cache.get("new_since_last") or [],
+            "improving": cache.get("improving") or [],
+            "decaying": cache.get("decaying") or [],
+            "breadth": cache.get("breadth") or {},
+        }
+        brief_cache["brief"] = brief_composer.compose_and_polish(
+            market_regime.get_cached(),
+            scan,
+            watchlist=db.get_watchlist(),
+            squeeze=squeeze_cache.get("results") or [],
+        )
+    except Exception as e:
+        logger.error(f"Brief compose failed: {e}")
+
 
 def _run_full_pipeline():
     """Run the full discover → score pipeline. Called by background task."""
@@ -94,8 +144,24 @@ def _run_full_pipeline():
     cache["scan_in_progress"] = True
 
     try:
-        # Step 1: Discover
-        uni = universe_builder.build_universe()
+        # Step 1: Discover — siloed engines (squeeze screen, photonics seeds)
+        # join through the same validate/rerank funnel as every other source
+        extra = {}
+        try:
+            sq = [r.get("ticker") for r in (squeeze_cache.get("results") or [])[:30] if r.get("ticker")]
+            if sq:
+                extra["squeeze_screen"] = sq
+            ph = []
+            for phase in (photonics_cache.get("phases") or []):
+                for cand in (phase.get("candidates") or []):
+                    t = cand.get("ticker")
+                    if t and t not in ph:
+                        ph.append(t)
+            if ph:
+                extra["photonics_seeds"] = ph[:30]
+        except Exception:
+            pass
+        uni = universe_builder.build_universe(extra_sources=extra or None)
         cache["universe"] = uni
         logger.info(f"Discovered {uni['total']} tickers")
 
@@ -103,21 +169,62 @@ def _run_full_pipeline():
             cache["scan_in_progress"] = False
             return
 
-        # Step 2: Score top 30
-        to_score = uni["tickers"][:40]
+        # Step 2: Score to depth — walk candidates until TARGET_SCORED accepted
+        # or MAX_ATTEMPTS tried (mega-cap/fund skips no longer eat scoring slots).
+        # Deliberately SERIAL: ~2.4-3.1s/ticker ≈ 3-5 min inside a 30-min budget;
+        # parallel yfinance risks rate-limited neutral scores polluting the data.
+        TARGET_SCORED, MAX_ATTEMPTS = 60, 90
+        disc_meta = uni.get("discovery_meta") or {}
         results = {}
-        for i, ticker in enumerate(to_score):
+        attempted = skipped = 0
+        for ticker in uni["tickers"][:MAX_ATTEMPTS]:
+            if len(results) >= TARGET_SCORED:
+                break
+            attempted += 1
             try:
                 result = _score_ticker(ticker)
+                quote = result.get("quote") or {}
+                if _is_mega_cap(quote):
+                    skipped += 1
+                    logger.info(f"  Skipped {ticker}: mega-cap (${_num(quote.get('market_cap'))/1e9:.0f}B)")
+                    continue
+                if _is_fund_or_trust(quote):
+                    skipped += 1
+                    logger.info(f"  Skipped {ticker}: closed-end fund/trust, not an operating company")
+                    continue
+                result["discovery"] = disc_meta.get(ticker)
+                if disc_meta.get(ticker, {}).get("feed_hint"):
+                    result["feed_hint"] = disc_meta[ticker]["feed_hint"]
+                # lane tag drives the day-trade scanners' exclusion and lets
+                # evaluation segment leader rows from microcap rows
+                result["lane"] = disc_meta.get(ticker, {}).get("lane") or "core"
                 results[ticker] = result
-                logger.info(f"  Scored {i+1}/{len(to_score)}: {ticker} = {result['composite']:.1f}")
+                logger.info(f"  Scored {len(results)}/{TARGET_SCORED}: {ticker} = {result['composite']:.1f}")
             except Exception as e:
                 logger.error(f"  Failed {ticker}: {e}")
+        logger.info(f"Scoring depth: accepted={len(results)} skipped={skipped} attempted={attempted}")
+        cache["scan_depth"] = {"accepted": len(results), "skipped": skipped, "attempted": attempted}
 
-        # Step 3: Rank
-        ranked = sorted(results.items(), key=lambda x: x[1]["composite"], reverse=True)
-        alerts = [t for t, r in ranked if r["multi_signal_alert"]]
-        ranked_list = [{"ticker": t, **r} for t, r in ranked]
+        # Step 3: Rank — composite tilted by the current regime (bounded, logged).
+        # composite is untouched; rank_score = composite × tilt drives ordering.
+        regime_now = market_regime.get_cached()
+        regime_label = (regime_now.get("mood") or {}).get("label") if regime_now.get("available") else None
+        ranked_list = [{"ticker": t, **r} for t, r in results.items()]
+        setup_stats = _setup_stats_map()  # measured edge per setup type (prior backtest)
+        cpw_gate = evaluation.cpw_gate(5)
+        for r in ranked_list:
+            tilt = regime_tilt.compute_tilt(r, regime_now)
+            r["tilt"] = tilt
+            r["rank_score"] = round(r["composite"] * tilt["factor"], 1)
+            r["setup"] = conviction.assess(r, regime_now, setup_stats=setup_stats,
+                                           cpw_gate=cpw_gate)  # graded verdict
+        # TIER-FIRST sort: the composite (IC +0.016 = noise) no longer decides who
+        # tops the list — the graded verdict does; the tilt-adjusted composite
+        # only orders WITHIN a tier (tilt is the one ordering with measured lift).
+        _TIER = {"A": 0, "B": 0, "WATCH": 1, "C": 1, "—": 1, "AVOID": 2}
+        ranked_list.sort(key=lambda x: (_TIER.get((x.get("setup") or {}).get("grade"), 1),
+                                        -x["rank_score"]))
+        alerts = [r["ticker"] for r in ranked_list if r["multi_signal_alert"]]
 
         # Step 4: Detect new tickers vs previous scan
         new_tickers = []
@@ -125,21 +232,34 @@ def _run_full_pipeline():
             old_tickers = {r["ticker"] for r in cache["ranked"]}
             new_tickers = [r["ticker"] for r in ranked_list if r["ticker"] not in old_tickers]
 
-        # Step 5: Detect score changes (stocks improving)
+        # Step 5: Detect score changes (stocks improving / decaying)
         improving = []
+        decaying = []
         if cache["results"]:
             for ticker, result in results.items():
                 old = cache["results"].get(ticker)
                 if old:
                     old_score = old.get("composite", 0)
                     new_score = result["composite"]
-                    if new_score - old_score >= 5:  # improved by 5+ points
-                        improving.append({
-                            "ticker": ticker,
-                            "old_score": old_score,
-                            "new_score": new_score,
-                            "change": round(new_score - old_score, 1),
-                        })
+                    delta = new_score - old_score
+                    entry = {
+                        "ticker": ticker,
+                        "old_score": old_score,
+                        "new_score": new_score,
+                        "change": round(delta, 1),
+                    }
+                    if delta >= 5:  # improved by 5+ points
+                        improving.append(entry)
+                    elif delta <= -5:  # faded by 5+ points
+                        decaying.append(entry)
+
+        # Step 6: Universe breadth from the edge gauges (zero extra fetches)
+        flags = [r.get("edge", {}).get("above_20ma") for r in results.values()]
+        flags = [f for f in flags if f is not None]
+        breadth = {
+            "pct_above_20ma": round(100 * sum(flags) / len(flags), 1) if flags else None,
+            "n": len(flags),
+        }
 
         # Update cache
         cache["results"] = results
@@ -147,13 +267,15 @@ def _run_full_pipeline():
         cache["alerts"] = alerts
         cache["new_since_last"] = new_tickers
         cache["improving"] = improving
+        cache["decaying"] = decaying
+        cache["breadth"] = breadth
         cache["last_scan"] = datetime.now().isoformat()
         cache["scan_in_progress"] = False
 
         # ─── Persist snapshots for backtesting ───
         try:
             ai_picks = [s["ticker"] for s in sorted(ranked_list, key=lambda x: x.get("ml_score", 0), reverse=True)[:3]]
-            db.save_snapshot(ranked_list, scan_date=cache["last_scan"], ai_picks=ai_picks)
+            db.save_snapshot(ranked_list, scan_date=cache["last_scan"], ai_picks=ai_picks, regime_label=regime_label)
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
@@ -164,10 +286,37 @@ def _run_full_pipeline():
         except Exception as e:
             logger.error(f"Failed to send alerts: {e}")
 
+        # ─── Paper-trade ledger pass (opens A/B plans, manages positions) ───
+        try:
+            rep = paper_ledger.process(ranked_list, regime_label=regime_label)
+            if rep and not rep.get("skipped"):
+                logger.info(f"Paper ledger: {rep}")
+        except Exception as e:
+            logger.error(f"Paper ledger pass failed: {e}")
+
+        # ─── Rebuild the intraday watcher's hot list from this scan ───
+        try:
+            hot = intraday_watch.build_hotlist(ranked_list, db.get_watchlist())
+            intraday_watch.set_hotlist(hot)
+            if hot:
+                logger.info(f"Intraday hotlist: {[h['ticker'] for h in hot]}")
+        except Exception as e:
+            logger.error(f"Hotlist rebuild failed: {e}")
+
+        # ─── Recompose the daily brief on fresh scan data ───
+        _recompose_brief()
+
+        # ─── Historical setup backtest (heavy; own daemon thread so the shared
+        # pool can't starve it; refresh at most every 6h) ───
+        if time.time() - _setup_bt_state["last"] > 6 * 3600:
+            _setup_bt_state["last"] = time.time()
+            tickers = [s["ticker"] for s in ranked_list]
+            threading.Thread(target=setup_backtest.refresh, args=(tickers,), daemon=True).start()
+
         logger.info(
             f"Pipeline done: {len(ranked_list)} scored, "
             f"{len(alerts)} alerts, {len(new_tickers)} new, "
-            f"{len(improving)} improving"
+            f"{len(improving)} improving, {len(decaying)} decaying"
         )
 
     except Exception as e:
@@ -224,14 +373,142 @@ def _run_axt_pipeline(tickers: list[str] | None = None):
     logger.info(f"AXT scan done: {len(results)} tickers, {sum(1 for r in results if r['is_candidate'])} candidates")
 
 
+def _run_regime_pipeline():
+    """Refresh the market regime + macro bias (and recompose the brief)."""
+    breadth = cache.get("breadth") or {}
+    market_regime.refresh(
+        breadth_universe_pct=breadth.get("pct_above_20ma"),
+        universe_n=breadth.get("n"),
+    )
+    try:
+        macro_bias.refresh()
+    except Exception as e:
+        logger.error(f"macro bias refresh failed: {e}")
+    _recompose_brief()
+
+
+async def _regime_loop():
+    """Refresh the market regime every REGIME_INTERVAL."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(config.REGIME_INTERVAL)
+        try:
+            await loop.run_in_executor(pool, _run_regime_pipeline)
+        except Exception as e:
+            logger.error(f"Regime refresh error: {e}")
+
+
+def _run_secondary_pipelines():
+    """Rerun the heavier discovery scanners (AXT, photonics, squeeze)."""
+    loop = asyncio.get_event_loop()
+    # Submit to the pool; each manages its own work and must not block each other
+    loop.run_in_executor(pool, _run_axt_pipeline, None)
+    loop.run_in_executor(pool, _run_photonics_pipeline)
+    loop.run_in_executor(pool, _run_squeeze_pipeline)
+
+
+_eval_state = {"last": 0.0}
+_setup_bt_state = {"last": 0.0}
+EVAL_INTERVAL = 6 * 3600  # forward-return backfill is heavy (~200 fetches); every 6h
+
+
+def _run_evaluation_pipeline(force: bool = False):
+    """Backfill realized forward returns + recompute scorecard/calibration."""
+    if not force and time.time() - _eval_state["last"] < EVAL_INTERVAL:
+        return
+    _eval_state["last"] = time.time()
+    try:
+        evaluation.refresh()
+    except Exception as e:
+        logger.error(f"Evaluation pipeline failed: {e}")
+
+
+async def _secondary_loop():
+    """Keep AXT / photonics / squeeze scans fresh on the same cadence as the main scan.
+
+    Without this they only ran once at startup and went stale (the squeeze
+    scanner in particular is the whole point of the Squeeze tab).
+    """
+    while True:
+        await asyncio.sleep(SCAN_INTERVAL)
+        try:
+            _run_secondary_pipelines()
+            asyncio.get_event_loop().run_in_executor(pool, _run_evaluation_pipeline, False)
+        except Exception as e:
+            logger.error(f"Secondary scan error: {e}")
+
+
+def _seconds_until_preopen() -> float:
+    """Seconds until the next weekday 08:45 ET (45 min before the NY open)."""
+    from zoneinfo import ZoneInfo
+    from datetime import timedelta
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    target = now.replace(hour=8, minute=45, second=0, microsecond=0)
+    while target <= now or target.weekday() >= 5:
+        target = (target + timedelta(days=1)).replace(hour=8, minute=45, second=0, microsecond=0)
+    return max(60.0, (target - now).total_seconds())
+
+
+async def _preopen_loop():
+    """Daily pre-open brief: the best-of list on Ruben's phone 45 minutes before
+    the New York open. Runs a fresh scan first so pre-market news (dilution
+    headlines, fresh 8-Ks, earnings dates) is in the grades — daily bars don't
+    move overnight, but the news does."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(_seconds_until_preopen())
+        try:
+            last = cache.get("last_scan")
+            stale = True
+            if last:
+                stale = (datetime.now() - datetime.fromisoformat(last)).total_seconds() > 15 * 60
+            if stale and not cache["scan_in_progress"]:
+                await loop.run_in_executor(pool, _run_full_pipeline)
+            regime = market_regime.get_cached()
+            label = (regime.get("mood") or {}).get("label") if regime.get("available") else None
+            sent = alerts_module.send_preopen_brief(cache.get("ranked") or [], regime_label=label)
+            logger.info(f"Pre-open brief sent: {sent}")
+        except Exception as e:
+            logger.error(f"Pre-open brief failed: {e}")
+        await asyncio.sleep(120)   # step past the trigger minute before re-arming
+
+
+async def _intraday_loop():
+    """5-minute breakout watcher over the hot list (market hours only).
+
+    Alert-only + instrumented; pre-registered kill at n>=30 alerts with 10d
+    avg excess <= 0 (see intraday_watch docstring)."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            if intraday_watch.in_window():
+                fired = await loop.run_in_executor(pool, intraday_watch.check_triggers)
+                for f in fired:
+                    alerts_module.alert_intraday_breakout(f)
+        except Exception as e:
+            logger.error(f"Intraday watcher error: {e}")
+        await asyncio.sleep(intraday_watch.cycle_seconds() if intraday_watch.in_window() else 15 * 60)
+
+
 async def _background_scanner():
     """Background task that runs the pipeline periodically."""
     loop = asyncio.get_event_loop()
+    # Regime first so the first scan/brief has market context, then keep it fresh
+    await loop.run_in_executor(pool, _run_regime_pipeline)
+    asyncio.create_task(_regime_loop())
+
     await loop.run_in_executor(pool, _run_full_pipeline)
-    # Run AXT + photonics + squeeze discovery scans after main pipeline
-    asyncio.create_task(loop.run_in_executor(pool, _run_axt_pipeline, None))
-    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
-    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
+    # Kick the heavier discovery scanners once now, then keep them fresh on a loop.
+    # NOTE: run_in_executor submits to the pool and returns a Future —
+    # do NOT wrap in asyncio.create_task (it requires a coroutine and raises).
+    _run_secondary_pipelines()
+    asyncio.create_task(_secondary_loop())
+    asyncio.create_task(_intraday_loop())
+    asyncio.create_task(_preopen_loop())
+
+    # Backfill forward-return evaluation once at startup (then 6h-gated in the loop)
+    loop.run_in_executor(pool, _run_evaluation_pipeline, True)
 
     # Then every SCAN_INTERVAL
     while True:
@@ -286,21 +563,57 @@ class ConfigUpdate(BaseModel):
 
 # --- Helpers ---
 
+def _num(x, default=0.0) -> float:
+    """Coerce to a finite float; yfinance loves returning None/NaN."""
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_mega_cap(quote: dict) -> bool:
+    """This app hunts small/mid-cap movers — discovery has no upper cap-size bound,
+    so a calm blue-chip ADR can slip in and read as a clean 'base' purely because
+    it's huge, not because it's coiling."""
+    return _num((quote or {}).get("market_cap", 0)) > config.MAX_MARKET_CAP
+
+
+def _is_fund_or_trust(quote: dict) -> bool:
+    """Closed-end funds / municipal bond trusts (ETG, GAB, NUV...) trade like
+    stocks and yfinance tags them quoteType=EQUITY, so they slip past every other
+    filter — but a fund has no employees (no operating business) and no 'coiled
+    spring before it flies' story to tell."""
+    q = quote or {}
+    return q.get("industry") == "Asset Management" and not q.get("employees")
+
+
 def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
     """Score a single ticker across all buckets."""
+    # Per-call weights — never mutate the global config.WEIGHTS (it races
+    # across the scoring thread pool).
+    local_weights = dict(config.WEIGHTS)
     if weights:
         for k, v in weights.items():
-            if k in config.WEIGHTS:
-                config.WEIGHTS[k] = v
+            if k in local_weights:
+                local_weights[k] = v
+
+    # Shared daily history — fetched once, reused by momentum + edge gauges
+    hist = price_history.get_history(ticker)
+    yf_info = None
 
     bucket_scores = {
         "fundamentals": fundamentals.score(ticker),
-        "momentum": momentum.score(ticker),
+        "momentum": momentum.score(ticker, hist=hist),
         "catalyst": catalysts.score(ticker),
         "insider": insiders.score(ticker),
         "sentiment": news_sentiment.score(ticker),
     }
-    result = scorer.composite_score(bucket_scores)
+    # Kill NaN at the source — a single NaN bucket poisons the composite,
+    # the ML layer, ranking sorts, and JSON serialization
+    for b in bucket_scores.values():
+        b["score"] = _num(b.get("score", 0))
+    result = scorer.composite_score(bucket_scores, weights=local_weights)
 
     # Add price/market data
     try:
@@ -320,14 +633,16 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 "year_low": q.get("yearLow", 0),
                 "sector": q.get("sector", ""),
                 "industry": q.get("industry", ""),
+                "employees": q.get("fullTimeEmployees"),
                 "name": q.get("name", ticker),
                 "description": desc,
             }
         else:
             import yfinance as yf
             info = yf.Ticker(ticker).info or {}
-            price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-            prev = info.get("previousClose", price)
+            yf_info = info
+            price = _num(info.get("currentPrice") or info.get("regularMarketPrice", 0))
+            prev = _num(info.get("previousClose", price), default=price)
             change_pct = ((price - prev) / prev * 100) if prev else 0
             # Short description
             desc = info.get("longBusinessSummary", "") or info.get("longName", "")
@@ -335,23 +650,114 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
                 desc = desc[:160].rsplit(" ", 1)[0] + "…"
             result["quote"] = {
                 "price": price,
-                "change_pct": change_pct,
-                "market_cap": info.get("marketCap", 0),
-                "volume": info.get("volume", 0),
-                "avg_volume": info.get("averageVolume", 0),
-                "year_high": info.get("fiftyTwoWeekHigh", 0),
-                "year_low": info.get("fiftyTwoWeekLow", 0),
+                "change_pct": _num(change_pct),
+                "market_cap": _num(info.get("marketCap", 0)),
+                "volume": _num(info.get("volume", 0)),
+                "avg_volume": _num(info.get("averageVolume", 0)),
+                "year_high": _num(info.get("fiftyTwoWeekHigh", 0)),
+                "year_low": _num(info.get("fiftyTwoWeekLow", 0)),
                 "sector": info.get("sector", ""),
                 "industry": info.get("industry", ""),
+                "employees": info.get("fullTimeEmployees"),
                 "name": info.get("shortName", ticker) or info.get("longName", ticker),
                 "description": desc,
             }
     except Exception:
         result["quote"] = None
 
+    # Quote fallback from the price history we ALWAYS have in hand: Yahoo
+    # rate-limits .info on the VPS ("Invalid Crumb" 401s) and a None quote
+    # silently poisons everything downstream — grades without prices, plans
+    # that read absurd, the movers list starving to zero. Daily closes are
+    # already fetched for every scored ticker; use them.
+    q = result.get("quote") or {}
+    if not q.get("price") and hist is not None and len(hist) >= 2:
+        try:
+            closes = hist["Close"]
+            px = float(closes.iloc[-1])
+            prev = float(closes.iloc[-2])
+            result["quote"] = {
+                **q,
+                "price": round(px, 4),
+                "change_pct": round((px / prev - 1) * 100, 2) if prev else 0.0,
+                "avg_volume": float(hist["Volume"].tail(20).mean()),
+                "market_cap": q.get("market_cap") or 0,
+                "name": q.get("name") or ticker,
+                "src": "hist_fallback",
+            }
+        except Exception:
+            pass
+
     # Add early detection / potential score
     early = early_detection.score(ticker, bucket_scores)
     result["early_detection"] = early
+
+    # Pre-breakout / coiled-spring detector — catch them BEFORE they fly
+    try:
+        result["coiled"] = pre_breakout.compute(ticker, hist)
+        # volume-delta proxies (the book's delta read, daily-bar edition)
+        try:
+            result["vol_delta"] = volume_delta.compute(hist)
+        except Exception:
+            result["vol_delta"] = dict(volume_delta.UNAVAILABLE)
+        # fresh-dilution flag for conviction's event gate (TTL-cached news — the
+        # same fetch news_sentiment/catalysts already made this cycle)
+        try:
+            result["news_flags"] = {"dilution": news_cache.fresh_dilution_headline(ticker)}
+        except Exception:
+            result["news_flags"] = {}
+    except Exception:
+        result["coiled"] = dict(pre_breakout.UNAVAILABLE)
+
+    # Academic factor candidates (awesome-systematic-trading). Report-only: these
+    # are persisted and IC-measured, and touch nothing in ranking until they earn
+    # it. Statements come from the fundamentals bucket's already-completed fetch,
+    # and SPY comes off price_history's TTL cache, so this adds no network calls.
+    try:
+        fund_raw = (bucket_scores.get("fundamentals") or {}).get("raw") or {}
+        result["factors"] = factors.compute(
+            hist,
+            info=fund_raw.get("info") or yf_info,
+            financials=fund_raw.get("financials"),
+            balance_sheet=fund_raw.get("balance_sheet"),
+            bench=price_history.get_history("SPY"),
+        )
+    except Exception:
+        result["factors"] = dict(factors.UNAVAILABLE)
+
+    # Sector-relative strength + the parabolic criteria ledger. Both read frames
+    # market_regime already cached this cycle, so neither adds a network call.
+    # parabolic MUST run before conviction.assess() — its V-recovery gate is what
+    # stops the confluence counter from counting one bounce as four confirmations.
+    try:
+        q = result.get("quote") or {}
+        fund_raw = (bucket_scores.get("fundamentals") or {}).get("raw") or {}
+        rs = sector_rs.compute(hist, sector=q.get("sector"), industry=q.get("industry"),
+                               market_cap=q.get("market_cap"))
+        result["sector_rs"] = rs
+        cat_metrics = (bucket_scores.get("catalyst") or {}).get("metrics") or {}
+        result["parabolic"] = parabolic.compute(
+            hist, rs=rs, market_cap=q.get("market_cap"),
+            earnings_days=cat_metrics.get("earnings_days"),
+            financials=fund_raw.get("financials"),
+            info=fund_raw.get("info") or yf_info,
+        )
+    except Exception:
+        result["sector_rs"] = {"available": False}
+        result["parabolic"] = dict(parabolic.UNAVAILABLE)
+
+    # Smart-money accumulation / demand-zone (supply/demand + institutional intent)
+    try:
+        result["smad"] = smad.compute(ticker, hist)
+    except Exception:
+        result["smad"] = dict(smad.UNAVAILABLE)
+
+    # Daily-bar book signals: market phase, RBS flip, reversal candle, volume
+    # profile, concrete trade plan (Supply & Demand Mastery + Institutional Intent)
+    try:
+        result["book"] = book_signals.compute(hist, zone=(result.get("smad") or {}).get("demand_zone"))
+    except Exception:
+        result["book"] = {"available": False}
 
     # Add competitor analysis
     comp = competitors.analyze(ticker)
@@ -377,11 +783,25 @@ def _score_ticker(ticker: str, weights: dict | None = None) -> dict:
         breakout["score"] * 0.45 +
         sector["score"] * 0.20
     )
-    result["ml_score"] = round(ml_score, 1)
+    result["ml_score"] = round(_num(ml_score), 1)
 
-    # Short squeeze potential
-    squeeze = short_squeeze.score(ticker, bucket_scores)
+    # Short squeeze potential — reuse the already-fetched yfinance info
+    squeeze = short_squeeze.score(ticker, bucket_scores, yf_info=yf_info)
     result["short_squeeze"] = squeeze
+
+    # Measured (calibrated) win-probability from the closed-loop evaluation,
+    # if calibration has been computed. None until enough forward data exists.
+    try:
+        p = evaluation.calibrated_p_win(result["composite"], "composite_score", 5)
+        result["calibrated_p_win"] = round(p, 3) if p is not None else None
+    except Exception:
+        result["calibrated_p_win"] = None
+
+    # Trading-regime gauges (FLOW / BEARING / PULSE) from the shared history
+    try:
+        result["edge"] = ticker_edge.compute(ticker, hist)
+    except Exception:
+        result["edge"] = dict(ticker_edge.UNAVAILABLE)
 
     return result
 
@@ -410,6 +830,8 @@ def _filter_ticker(ticker: str) -> dict:
             return {"ticker": ticker, "passed": False, "reason": f"Volume {avg_vol:,.0f}"}
         if mcap < config.MIN_MARKET_CAP:
             return {"ticker": ticker, "passed": False, "reason": f"MCap ${mcap/1e6:.0f}M"}
+        if mcap > config.MAX_MARKET_CAP:
+            return {"ticker": ticker, "passed": False, "reason": f"MCap ${mcap/1e9:.0f}B (mega-cap)"}
         return {"ticker": ticker, "passed": True, "reason": "OK"}
     except Exception:
         return {"ticker": ticker, "passed": False, "reason": "Error fetching data"}
@@ -435,15 +857,57 @@ async def dashboard():
     Main endpoint — returns cached results instantly.
     No waiting. Background scanner keeps data fresh.
     """
+    regime = market_regime.get_cached()
     return _clean({
         "universe": cache["universe"],
         "ranked": cache["ranked"],
         "alerts": cache["alerts"],
         "new_tickers": cache.get("new_since_last", []),
         "improving": cache.get("improving", []),
+        "decaying": cache.get("decaying", []),
+        "breadth": cache.get("breadth"),
+        "market_regime": {
+            "score": regime.get("mood", {}).get("score"),
+            "label": regime.get("mood", {}).get("label"),
+            "vix": regime.get("volatility", {}).get("vix"),
+            "as_of": regime.get("as_of"),
+        } if regime.get("available") else None,
         "last_scan": cache["last_scan"],
         "scan_in_progress": cache["scan_in_progress"],
         "next_scan_in": _next_scan_seconds(),
+        "setup_stats": _setup_stats_map(),
+    })
+
+
+def _setup_stats_map():
+    """Compact per-setup stats from the historical backtest (TRADEABLE leg), so
+    the UI can show each setup's measured edge and conviction can demote."""
+    bt = setup_backtest.get_cached().get("data")
+    if not bt:
+        return None
+    return {r["setup"]: {"win_rate": r["win_rate"], "avg_r": r["avg_r"], "n": r["n"],
+                         "expectancy_lb": r.get("expectancy_lb"),
+                         "ar_shrunk": r.get("ar_shrunk"),
+                         "capped": r.get("capped"),
+                         "fill_rate": r.get("fill_rate")}
+            for r in bt.get("by_setup", [])}
+
+
+@app.get("/api/setup-backtest")
+async def get_setup_backtest():
+    """Full historical setup backtest — win-rate + expectancy per setup type."""
+    return _clean(setup_backtest.get_cached())
+
+
+@app.get("/api/ledger")
+async def get_ledger():
+    """Paper-trade ledger: realized performance of A/B plans at real fills,
+    plus the open/pending book."""
+    return _clean({
+        "scorecard": evaluation.ledger_scorecard(),
+        "open": db.get_paper_trades(status="open"),
+        "pending": db.get_paper_trades(status="pending"),
+        "recent_closed": db.get_paper_trades(status="closed")[-20:],
     })
 
 
@@ -465,9 +929,7 @@ async def force_scan():
     if cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(
-        loop.run_in_executor(pool, _run_full_pipeline)
-    )
+    loop.run_in_executor(pool, _run_full_pipeline)
     return {"status": "started"}
 
 
@@ -692,13 +1154,27 @@ async def get_backtest():
 
 @app.get("/api/alerts/recent")
 async def get_recent_alerts():
-    return {"alerts": db.get_recent_alerts(limit=20), "telegram_configured": alerts_module.is_configured()}
+    return {
+        "alerts": db.get_recent_alerts(limit=20),
+        "configured": alerts_module.is_configured(),
+        "channels": {
+            "pushover": alerts_module._pushover_configured(),
+            "telegram": alerts_module._telegram_configured(),
+        },
+    }
 
 
 @app.post("/api/alerts/test")
 async def test_alert():
     success = alerts_module.send_test()
-    return {"sent": success, "configured": alerts_module.is_configured()}
+    return {
+        "sent": success,
+        "configured": alerts_module.is_configured(),
+        "channels": {
+            "pushover": alerts_module._pushover_configured(),
+            "telegram": alerts_module._telegram_configured(),
+        },
+    }
 
 
 # ────────────────────────────────────────────
@@ -727,9 +1203,7 @@ async def run_axt_scan(req: AxtScanRequest):
     if axt_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(
-        loop.run_in_executor(pool, _run_axt_pipeline, req.tickers)
-    )
+    loop.run_in_executor(pool, _run_axt_pipeline, req.tickers)
     return {"status": "started"}
 
 
@@ -762,7 +1236,7 @@ async def rescan_photonics_cycle():
     if photonics_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(loop.run_in_executor(pool, _run_photonics_pipeline))
+    loop.run_in_executor(pool, _run_photonics_pipeline)
     return {"status": "started"}
 
 
@@ -780,6 +1254,94 @@ async def photonics_score_single(ticker: str):
         "phases": results,
         "best_phase": max(results.items(), key=lambda x: x[1]["phase_score"])[0],
     })
+
+
+# ────────────────────────────────────────────
+# Market Regime / Brief / History endpoints
+# ────────────────────────────────────────────
+
+@app.get("/api/market-regime")
+async def get_market_regime():
+    """Cached market-regime payload (mood, indices, volatility, sectors, narrative)
+    + per-market macro bias + upcoming high-impact economic events."""
+    payload = dict(market_regime.get_cached())
+    payload["macro_bias"] = macro_bias.get_cached()
+    payload["econ_events"] = econ_calendar.upcoming(days=7)
+    return _clean(payload)
+
+
+@app.post("/api/market-regime/refresh")
+async def refresh_market_regime():
+    """Trigger an immediate regime refresh."""
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(pool, _run_regime_pipeline)
+    return {"status": "started"}
+
+
+@app.get("/api/brief")
+async def get_brief():
+    """The latest composed daily brief (template or LLM-polished)."""
+    return _clean({"brief": brief_cache.get("brief"), "last_scan": cache.get("last_scan")})
+
+
+@app.get("/api/scorecard")
+async def get_scorecard():
+    """Measured model scorecard: per-signal IC, decile hit-rates, calibration, coverage.
+
+    Builds from already-persisted snapshot_returns (no network) if the
+    background backfill hasn't populated the in-memory cache yet.
+    """
+    cached = evaluation.get_cached()
+    if not cached.get("scorecards"):
+        cards = {h: evaluation.scorecard(h) for h in evaluation.HORIZONS}
+        for h in evaluation.HORIZONS:
+            for sig in ("composite_score", "ml_score"):
+                evaluation.calibration(sig, h)
+        cached = evaluation.get_cached()
+        cached["scorecards"] = cards
+    return _clean(cached)
+
+
+@app.post("/api/scorecard/refresh")
+async def refresh_scorecard():
+    """Force a fresh forward-return backfill + recompute (heavy)."""
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(pool, _run_evaluation_pipeline, True)
+    return {"status": "started"}
+
+
+@app.get("/api/price-history/{ticker}")
+async def get_price_history(ticker: str, period: str = "6mo"):
+    """Daily closes for the deep-dive price chart (via the shared TTL cache)."""
+    def _load():
+        hist = price_history.get_history(ticker.upper(), period=period)
+        if hist is None or hist.empty:
+            return {"ticker": ticker.upper(), "points": []}
+        pts = [
+            {"date": d.strftime("%Y-%m-%d"), "close": round(float(c), 4)}
+            for d, c in zip(hist.index, hist["Close"].to_numpy())
+            if math.isfinite(float(c))
+        ]
+        return {"ticker": ticker.upper(), "points": pts}
+
+    loop = asyncio.get_event_loop()
+    return _clean(await loop.run_in_executor(pool, _load))
+
+
+@app.get("/api/history/{ticker}")
+async def get_score_history(ticker: str):
+    """Score history for sparklines, from scan snapshots (ascending)."""
+    rows = db.get_snapshots(ticker.upper())
+    points = [
+        {
+            "scan_date": r["scan_date"],
+            "composite": r.get("composite_score"),
+            "ml_score": r.get("ml_score"),
+            "price": r.get("price"),
+        }
+        for r in reversed(rows)
+    ]
+    return _clean({"ticker": ticker.upper(), "points": points, "count": len(points)})
 
 
 # ────────────────────────────────────────────
@@ -803,7 +1365,7 @@ async def rescan_squeeze():
     if squeeze_cache["scan_in_progress"]:
         return {"status": "already_running"}
     loop = asyncio.get_event_loop()
-    asyncio.create_task(loop.run_in_executor(pool, _run_squeeze_pipeline))
+    loop.run_in_executor(pool, _run_squeeze_pipeline)
     return {"status": "started"}
 
 

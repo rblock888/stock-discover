@@ -1,8 +1,10 @@
 "use client";
 
-import { StockResult, BucketScore, ShortSqueezeResult, addToWatchlist } from "@/lib/api";
+import { StockResult, BucketScore, EdgeGauge, HistoryResponse, addToWatchlist, getHistory } from "@/lib/api";
 import { TickerLogo } from "./TickerLogo";
-import { useState } from "react";
+import { Sparkline } from "./gauges";
+import { openTicker } from "./TickerDrawer";
+import { useEffect, useState } from "react";
 
 const BUCKETS = [
   { key: "fundamentals", label: "Fundamentals" },
@@ -17,6 +19,45 @@ function scoreColor(s: number) {
   if (s >= 60) return "var(--green-bright)";
   if (s >= 40) return "var(--amber)";
   return "var(--red)";
+}
+
+function edgeColor(state: string): string {
+  switch (state) {
+    case "HEALTHY":
+    case "CLEAN UP":
+    case "TRADABLE":
+      return "var(--green)";
+    case "CROWDED":
+    case "CHOPPY UP":
+      return "var(--amber)";
+    case "WILD":
+    case "CHOPPY DOWN":
+    case "DOWN":
+      return "var(--red)";
+    case "QUIET":
+      return "var(--accent-bright)";
+    default: // THIN, FLAT, UNKNOWN
+      return "var(--text-muted)";
+  }
+}
+
+function EdgePill({ name, gauge }: { name: string; gauge?: EdgeGauge }) {
+  if (!gauge) return null;
+  const color = edgeColor(gauge.state);
+  return (
+    <div
+      className="flex-1 rounded px-2 py-1.5 cursor-help"
+      style={{ backgroundColor: "var(--bg-primary)", border: `1px solid ${color}30` }}
+      title={`${gauge.summary}\n${gauge.advice.map((a) => `• ${a}`).join("\n")}`}
+    >
+      <div className="text-[8px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
+        {name}
+      </div>
+      <div className="text-[10px] font-bold mt-0.5 truncate" style={{ color }}>
+        {gauge.state}
+      </div>
+    </div>
+  );
 }
 
 function formatMcap(n: number): string {
@@ -99,10 +140,20 @@ export function StockCard({ stock }: { stock: StockResult }) {
   const [expanded, setExpanded] = useState(false);
   const [added, setAdded] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [history, setHistory] = useState<HistoryResponse | null>(null);
   const early = stock.early_detection?.score ?? 0;
   const comp = stock.competitors;
   const { pros, cons } = extractReasons(stock.breakdown, early);
   const thesis = buildThesis(stock);
+
+  // Lazy-load score history the first time the card is expanded
+  useEffect(() => {
+    if (expanded && history === null) {
+      getHistory(stock.ticker)
+        .then(setHistory)
+        .catch(() => setHistory({ ticker: stock.ticker, points: [], count: 0 }));
+    }
+  }, [expanded, history, stock.ticker]);
 
   async function handleAdd(e: React.MouseEvent) {
     e.stopPropagation();
@@ -121,21 +172,20 @@ export function StockCard({ stock }: { stock: StockResult }) {
   }
 
   return (
-    <div
-      className="rounded-lg overflow-hidden transition-all"
-      style={{
-        backgroundColor: "var(--bg-surface)",
-        border: `1px solid ${stock.multi_signal_alert ? "var(--amber)" : "var(--border)"}`,
-      }}
-    >
+    <div className={`glass glass-hover rounded-2xl overflow-hidden${stock.multi_signal_alert ? " alert-ring" : ""}`}>
       {/* ── Top: logo + ticker + composite ── */}
       <div className="flex items-center gap-3 px-4 pt-4 pb-3">
         <TickerLogo ticker={stock.ticker} size={40} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[17px] font-bold" style={{ letterSpacing: "-0.02em" }}>
+            <button
+              onClick={() => openTicker(stock)}
+              className="text-[17px] font-bold transition-colors hover:underline"
+              style={{ letterSpacing: "-0.02em", textUnderlineOffset: 3 }}
+              title="Open deep-dive"
+            >
               {stock.ticker}
-            </span>
+            </button>
             {stock.quote?.price ? (
               <span
                 className="text-[13px] font-semibold tabular-nums"
@@ -156,12 +206,37 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 {stock.quote.change_pct.toFixed(2)}%
               </span>
             )}
+            {stock.setup && stock.setup.grade !== "—" && (() => {
+              const g = stock.setup.grade;
+              const col = g === "A" ? "var(--green)" : g === "B" ? "var(--accent-cyan)" : g === "C" ? "var(--amber)"
+                : g === "WATCH" ? "var(--text-secondary)" : "var(--red)";
+              const label = g === "AVOID" ? "AVOID" : g === "WATCH" ? "WATCH" : `Grade ${g}`;
+              return (
+                <span className="text-[10px] font-bold px-1.5 py-[2px] rounded cursor-help"
+                  style={{ backgroundColor: `color-mix(in srgb, ${col} 20%, transparent)`, color: col }}
+                  title={`${stock.setup.setup} — ${stock.setup.thesis}${stock.setup.action ? `\n→ ${stock.setup.action}` : ""}`}>
+                  {label}
+                </span>
+              );
+            })()}
             {stock.multi_signal_alert && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
                 style={{ backgroundColor: "var(--amber-dim)", color: "var(--amber)" }}
               >
                 Alert
+              </span>
+            )}
+            {stock.tilt && Math.abs(stock.tilt.factor - 1) >= 0.04 && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.08em] px-1.5 py-[2px] rounded cursor-help"
+                style={{
+                  backgroundColor: stock.tilt.factor >= 1 ? "var(--green-dim)" : "var(--red-dim)",
+                  color: stock.tilt.factor >= 1 ? "var(--green)" : "var(--red)",
+                }}
+                title={`Regime tilt — ranked ${stock.tilt.factor >= 1 ? "up" : "down"} ${Math.abs((stock.tilt.factor - 1) * 100).toFixed(0)}% by current conditions:\n${stock.tilt.reasons.join("\n")}`}
+              >
+                {stock.tilt.factor >= 1 ? "▲" : "▼"} regime {stock.tilt.factor >= 1 ? "+" : "−"}{Math.abs((stock.tilt.factor - 1) * 100).toFixed(0)}%
               </span>
             )}
             {early >= 65 && (
@@ -172,6 +247,51 @@ export function StockCard({ stock }: { stock: StockResult }) {
                 Early
               </span>
             )}
+            {stock.coiled?.state === "BREAKING" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "var(--green-dim)", color: "var(--green-bright)", boxShadow: "0 0 10px color-mix(in srgb, var(--green-bright) 45%, transparent)" }}
+                title={stock.coiled.summary}
+              >
+                ⚡ Breakout
+              </span>
+            )}
+            {stock.coiled?.state === "COILED" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "color-mix(in srgb, var(--accent-cyan) 18%, transparent)", color: "var(--accent-cyan)" }}
+                title={stock.coiled.summary}
+              >
+                ⊟ Coiled
+              </span>
+            )}
+            {stock.coiled?.state === "EXTENDED" && (
+              <span
+                className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                style={{ backgroundColor: "var(--amber-dim)", color: "var(--amber)" }}
+                title={`Already extended${stock.coiled.ret_3m_pct ? ` (+${stock.coiled.ret_3m_pct.toFixed(0)}% in 3m)` : ""} — chase risk`}
+              >
+                Extended
+              </span>
+            )}
+            {(() => {
+              const sm = stock.smad;
+              if (!sm?.available) return null;
+              const map: Record<string, [string, string, string]> = {
+                SPRING: ["⤴ Spring", "var(--green-bright)", "var(--green-dim)"],
+                "BOS IMPULSE": ["↗ BOS", "var(--green)", "var(--green-dim)"],
+                "DEMAND RETEST": ["◎ Retest", "var(--accent-cyan)", "color-mix(in srgb, var(--accent-cyan) 18%, transparent)"],
+                "BULL TRAP": ["⚠ Trap", "var(--red)", "var(--red-dim)"],
+              };
+              const m = map[sm.state];
+              if (!m) return null;
+              return (
+                <span className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
+                  style={{ backgroundColor: m[2], color: m[1] }} title={sm.summary}>
+                  {m[0]}
+                </span>
+              );
+            })()}
             {stock.short_squeeze && stock.short_squeeze.score >= 60 && (
               <span
                 className="text-[9px] font-bold uppercase tracking-[0.1em] px-1.5 py-[2px] rounded"
@@ -292,6 +412,15 @@ export function StockCard({ stock }: { stock: StockResult }) {
         })}
       </div>
 
+      {/* ── Trading regime gauges (FLOW / BEARING / PULSE) ── */}
+      {stock.edge?.available && (
+        <div className="flex gap-1.5 px-4 pb-3 -mt-1">
+          <EdgePill name="Flow" gauge={stock.edge.flow} />
+          <EdgePill name="Bearing" gauge={stock.edge.bearing} />
+          <EdgePill name="Pulse" gauge={stock.edge.pulse} />
+        </div>
+      )}
+
       {/* ── Why section ── */}
       {(pros.length > 0 || cons.length > 0) && (
         <div className="px-4 py-2.5 space-y-1" style={{ borderTop: "1px solid var(--border)" }}>
@@ -315,26 +444,26 @@ export function StockCard({ stock }: { stock: StockResult }) {
         <div className="px-4 py-3 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>
           <div className="flex items-center gap-2">
             <span className="text-[9px] uppercase tracking-[0.1em] font-bold" style={{ color: "var(--accent)" }}>
-              AI Prediction
+              Model Signals
             </span>
-            {stock.ml_score !== undefined && (
+            {/* The honest, measured number when calibration exists */}
+            {stock.calibrated_p_win != null ? (
               <span
-                className="text-[11px] font-bold tabular-nums px-1.5 py-[1px] rounded"
-                style={{
-                  color: scoreColor(stock.ml_score),
-                  backgroundColor: stock.ml_score >= 60 ? scoreColor(stock.ml_score) + "20" : "var(--bg-primary)",
-                  fontFamily: "var(--font-mono)",
-                }}
+                className="text-[10px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+                style={{ color: "var(--green)", backgroundColor: "var(--green-dim)", fontFamily: "var(--font-mono)" }}
+                title="Measured historical hit-rate (≥+10% in 5 trading days) for stocks at this composite score"
               >
-                {stock.ml_score.toFixed(0)}
+                {(stock.calibrated_p_win * 100).toFixed(0)}% measured win
               </span>
+            ) : (
+              <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>uncalibrated</span>
             )}
           </div>
 
-          {/* Breakout probability */}
+          {/* Breakout model — relabeled: this is a heuristic score, not a probability */}
           {stock.breakout && stock.breakout.score >= 20 && (
             <div className="flex items-baseline gap-2 text-[11px]">
-              <span style={{ color: "var(--text-muted)" }}>Breakout 60d:</span>
+              <span style={{ color: "var(--text-muted)" }}>Breakout model:</span>
               <span
                 className="font-bold tabular-nums"
                 style={{
@@ -342,37 +471,29 @@ export function StockCard({ stock }: { stock: StockResult }) {
                   fontFamily: "var(--font-mono)",
                 }}
               >
-                {stock.breakout.score.toFixed(0)}% prob
+                {stock.breakout.score.toFixed(0)}/100
               </span>
-              {stock.breakout.expected_return_pct > 0 && (
-                <span style={{ color: "var(--green)" }}>
-                  +{stock.breakout.expected_return_pct}% exp
-                </span>
-              )}
               <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                ({stock.breakout.confidence} conf)
+                ({stock.breakout.confidence} conf{stock.calibrated_p_win == null ? ", uncalibrated" : ""})
               </span>
             </div>
           )}
 
-          {/* Pattern match */}
+          {/* Closest historical setup — relabeled: cosine proximity, not a calibrated match */}
           {stock.pattern_match && stock.pattern_match.best_match && stock.pattern_match.score >= 50 && (
             <div className="text-[11px]">
               <div className="flex items-center gap-1.5 mb-1">
-                <span style={{ color: "var(--text-muted)" }}>Looks like:</span>
+                <span style={{ color: "var(--text-muted)" }}>Closest setup:</span>
                 <div className="flex items-center gap-1">
                   <span className="font-bold" style={{ color: "var(--text-primary)" }}>
                     {stock.pattern_match.best_match}
                   </span>
-                  <span style={{ color: "var(--green)" }}>
-                    +{stock.pattern_match.matches[0]?.move_pct}%
-                  </span>
-                  <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                    in {stock.pattern_match.matches[0]?.move_days}d
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    (+{stock.pattern_match.matches[0]?.move_pct}% in {stock.pattern_match.matches[0]?.move_days}d)
                   </span>
                 </div>
-                <span className="text-[10px]" style={{ color: "var(--accent)" }}>
-                  {stock.pattern_match.score.toFixed(0)}% match
+                <span className="text-[10px]" style={{ color: "var(--text-muted)" }} title="Feature-vector proximity to a hand-curated historical setup — not a probability">
+                  {Math.min(99, stock.pattern_match.score).toFixed(0)} proximity
                 </span>
               </div>
               {stock.pattern_match.matches[0]?.thesis && (
@@ -386,15 +507,10 @@ export function StockCard({ stock }: { stock: StockResult }) {
           {/* Sector catch-up */}
           {stock.sector_momentum && stock.sector_momentum.score >= 30 && (
             <div className="flex items-baseline gap-2 text-[11px]">
-              <span style={{ color: "var(--text-muted)" }}>Catch-up:</span>
+              <span style={{ color: "var(--text-muted)" }}>Catch-up model:</span>
               <span className="font-bold tabular-nums" style={{ color: "var(--amber)", fontFamily: "var(--font-mono)" }}>
-                {stock.sector_momentum.score.toFixed(0)}%
+                {stock.sector_momentum.score.toFixed(0)}/100
               </span>
-              {stock.sector_momentum.expected_catch_up_pct > 0 && (
-                <span style={{ color: "var(--green)" }}>
-                  +{stock.sector_momentum.expected_catch_up_pct}% exp
-                </span>
-              )}
             </div>
           )}
 
@@ -532,6 +648,35 @@ export function StockCard({ stock }: { stock: StockResult }) {
 
       {expanded && (
         <div className="px-4 py-3 space-y-2.5" style={{ borderTop: "1px solid var(--border)" }}>
+          {/* Score trajectory across past scans */}
+          {history && history.points.length >= 3 && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                  Score trajectory
+                </span>
+                <span className="flex items-center gap-2 text-[9px]" style={{ color: "var(--text-muted)" }}>
+                  <span className="flex items-center gap-1">
+                    <span className="w-[10px] h-[2px] rounded" style={{ backgroundColor: "var(--accent-bright)" }} />
+                    Score
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-[10px] h-[2px] rounded" style={{ backgroundColor: "#ec4899" }} />
+                    AI
+                  </span>
+                  <span>{history.points.length} scans</span>
+                </span>
+              </div>
+              <Sparkline
+                height={40}
+                series={[
+                  { points: history.points.map((p) => p.composite), color: "var(--accent-bright)" },
+                  { points: history.points.map((p) => p.ml_score), color: "#ec4899", dashed: true },
+                ]}
+              />
+            </div>
+          )}
+
           {BUCKETS.map((b) => {
             const bucket = stock.breakdown[b.key];
             if (!bucket) return null;
